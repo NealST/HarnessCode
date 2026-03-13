@@ -1,0 +1,21 @@
+[package]
+name = "harnesscode-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "HarnessCode CLI — a beautiful terminal interface for the safe AI coding agent."
+
+[[bin]]
+name = "harnesscode"
+path = "src/main.rs"
+
+[dependencies]
+harnesscode-core = { path = "../core" }
+tokio.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+inquire.workspace = true
+indicatif.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
