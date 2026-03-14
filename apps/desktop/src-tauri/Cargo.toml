@@ -1,0 +1,24 @@
+[package]
+name = "harnesscode-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "HarnessCode desktop application — Tauri v2 backend exposing core agent commands."
+
+# Tauri requires a lib target to expose commands to the frontend.
+[lib]
+name = "harnesscode_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+harnesscode-core = { path = "../../../crates/core" }
+tauri.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
