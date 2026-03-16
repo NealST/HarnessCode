@@ -11,6 +11,8 @@
 //! | [`risk_management`] | [`RiskManager`](risk_management::RiskManager) that scores file changes |
 //! | [`context`] | Helpers for generating and parsing `agents.md` / `Claude.md` context files |
 
+pub mod config;
 pub mod context;
+pub mod llm;
 pub mod multi_agent;
 pub mod risk_management;

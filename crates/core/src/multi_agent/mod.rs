@@ -7,8 +7,10 @@
 //! * [`AgentOutput`] — the result produced by a single agent execution.
 //! * [`Controller`] — cybernetic feedback loop that drives the pipeline to convergence.
 
+use crate::llm::{LlmMessage, LlmProvider};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
 use tracing::{info, warn};
 
@@ -27,6 +29,9 @@ pub enum AgentError {
 
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    #[error("LLM provider error: {0}")]
+    Provider(#[from] crate::llm::LlmError),
 }
 
 // ──────────────────────────────────────────────
@@ -93,88 +98,201 @@ pub trait Agent: Send + Sync {
 }
 
 // ──────────────────────────────────────────────
-// Concrete mock agents (used for testing / demos)
+// Helpers
 // ──────────────────────────────────────────────
 
-/// A minimal Planner agent that produces a mock execution plan.
-pub struct PlannerAgent;
+/// Try to parse `text` as JSON; if it fails, return `{"raw": "<text>"}`.
+fn parse_json_or_wrap(text: &str) -> serde_json::Value {
+    serde_json::from_str(text)
+        .unwrap_or_else(|_| serde_json::json!({ "raw": text }))
+}
+
+// ──────────────────────────────────────────────
+// LLM-backed agents
+// ──────────────────────────────────────────────
+
+// ── Planner ────────────────────────────────────
+
+const PLANNER_SYSTEM: &str = "\
+You are a senior software engineer acting as a technical planning agent for HarnessCode, a safe AI coding assistant.
+Your job is to decompose a coding task into a precise, executable plan.
+
+Respond ONLY with a valid JSON object in this exact format:
+{
+  \"steps\": [\"step 1\", \"step 2\"],
+  \"affected_files\": [\"src/file.rs\"],
+  \"success_criteria\": \"all tests pass and the feature works as described\",
+  \"complexity\": \"low\"
+}
+
+Fields:
+- steps: ordered list of atomic, concrete actions
+- affected_files: list of file paths that will be created or modified
+- success_criteria: what done looks like
+- complexity: one of low | medium | high
+
+Do not include any text outside the JSON object.";
+
+/// Planner agent backed by an LLM. Decomposes the user's task into steps.
+pub struct LlmPlannerAgent {
+    pub llm: Arc<dyn LlmProvider>,
+}
 
 #[async_trait::async_trait]
-impl Agent for PlannerAgent {
+impl Agent for LlmPlannerAgent {
     fn role(&self) -> AgentRole {
         AgentRole::Planner
     }
 
     async fn execute(&self, context: &str) -> Result<AgentOutput, AgentError> {
         info!(role = %AgentRole::Planner, "Analysing task and building execution plan");
-        let plan = serde_json::json!({
-            "steps": [
-                "Analyse existing codebase",
-                "Identify files to modify",
-                "Generate code changes",
-                "Run sandboxed tests",
-                "Verify output"
-            ],
-            "input_summary": context
-        });
+
+        let messages = vec![
+            LlmMessage::system(PLANNER_SYSTEM),
+            LlmMessage::user(format!("Task: {context}")),
+        ];
+
+        let response = self.llm.complete(&messages).await?;
+        let payload = parse_json_or_wrap(&response.content);
+
+        let summary = payload
+            .get("steps")
+            .and_then(|s| s.as_array())
+            .map(|steps| format!("Plan ready: {} step(s)", steps.len()))
+            .unwrap_or_else(|| "Execution plan generated".to_string());
+
         Ok(AgentOutput {
             role: AgentRole::Planner,
-            summary: format!("Plan generated for task: {}", context),
-            payload: plan,
+            summary,
+            payload,
             success: true,
         })
     }
 }
 
-/// A minimal Coder agent that produces a mock code diff.
-pub struct CoderAgent;
+// ── Coder ──────────────────────────────────────
+
+const CODER_SYSTEM: &str = "\
+You are an expert software engineer working on a real codebase via HarnessCode.
+Given an execution plan, generate the exact code changes required.
+
+Respond ONLY with a valid JSON object in this exact format:
+{
+  \"diff\": \"--- a/src/main.rs\\n+++ b/src/main.rs\\n@@ -1 +1 @@\\n-// TODO\\n+// Done\",
+  \"files_changed\": 1,
+  \"explanation\": \"Replaced placeholder comment with implementation\",
+  \"language\": \"rust\"
+}
+
+Fields:
+- diff: unified diff of ALL changes (--- a/path / +++ b/path format)
+- files_changed: number of files modified
+- explanation: concise description of what changed and why
+- language: primary programming language used
+
+Generate real, correct, working code. Do not include any text outside the JSON object.";
+
+/// Coder agent backed by an LLM. Generates code diffs from the Planner's output.
+pub struct LlmCoderAgent {
+    pub llm: Arc<dyn LlmProvider>,
+}
 
 #[async_trait::async_trait]
-impl Agent for CoderAgent {
+impl Agent for LlmCoderAgent {
     fn role(&self) -> AgentRole {
         AgentRole::Coder
     }
 
     async fn execute(&self, context: &str) -> Result<AgentOutput, AgentError> {
-        info!(role = %AgentRole::Coder, "Generating code changes");
-        let diff = serde_json::json!({
-            "type": "code_diff",
-            "files_changed": 1,
-            "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-// TODO\n+// Implemented",
-            "context": context
-        });
+        info!(role = %AgentRole::Coder, "Generating code changes from plan");
+
+        let messages = vec![
+            LlmMessage::system(CODER_SYSTEM),
+            LlmMessage::user(format!("Execution plan:\n{context}")),
+        ];
+
+        let response = self.llm.complete(&messages).await?;
+        let payload = parse_json_or_wrap(&response.content);
+
+        let summary = payload
+            .get("explanation")
+            .and_then(|e| e.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Code changes generated".to_string());
+
         Ok(AgentOutput {
             role: AgentRole::Coder,
-            summary: "Code diff generated".to_string(),
-            payload: diff,
+            summary,
+            payload,
             success: true,
         })
     }
 }
 
-/// A minimal Reviewer agent that validates the coder's output.
-pub struct ReviewerAgent;
+// ── Reviewer ───────────────────────────────────
+
+const REVIEWER_SYSTEM: &str = "\
+You are a senior code reviewer at HarnessCode specialising in security, correctness, and code quality.
+Analyse the provided code changes and decide whether to approve them.
+
+Respond ONLY with a valid JSON object in this exact format:
+{
+  \"approved\": true,
+  \"issues\": [],
+  \"security_concerns\": [],
+  \"recommendation\": \"LGTM — code is correct and safe to merge\"
+}
+
+Fields:
+- approved: true if changes are safe and correct, false if they must be revised
+- issues: list of functional or quality problems (empty array if none)
+- security_concerns: list of security problems such as injection, data leaks, etc. (empty array if none)
+- recommendation: one-sentence human-readable verdict
+
+Set approved to false if there are ANY critical issues or security concerns.
+Do not include any text outside the JSON object.";
+
+/// Reviewer agent backed by an LLM. Validates the Coder's output.
+pub struct LlmReviewerAgent {
+    pub llm: Arc<dyn LlmProvider>,
+}
 
 #[async_trait::async_trait]
-impl Agent for ReviewerAgent {
+impl Agent for LlmReviewerAgent {
     fn role(&self) -> AgentRole {
         AgentRole::Reviewer
     }
 
     async fn execute(&self, context: &str) -> Result<AgentOutput, AgentError> {
-        info!(role = %AgentRole::Reviewer, "Reviewing generated changes");
-        let report = serde_json::json!({
-            "type": "review_report",
-            "tests_passed": true,
-            "lint_passed": true,
-            "security_scan": "clean",
-            "context": context
-        });
+        info!(role = %AgentRole::Reviewer, "Reviewing generated code changes");
+
+        let messages = vec![
+            LlmMessage::system(REVIEWER_SYSTEM),
+            LlmMessage::user(format!("Code changes to review:\n{context}")),
+        ];
+
+        let response = self.llm.complete(&messages).await?;
+        let payload = parse_json_or_wrap(&response.content);
+
+        let approved = payload
+            .get("approved")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let recommendation = payload
+            .get("recommendation")
+            .and_then(|r| r.as_str())
+            .unwrap_or(if approved {
+                "Approved"
+            } else {
+                "Rejected — revisions required"
+            });
+
         Ok(AgentOutput {
             role: AgentRole::Reviewer,
-            summary: "Review complete — all checks passed".to_string(),
-            payload: report,
-            success: true,
+            summary: recommendation.to_string(),
+            payload,
+            success: approved,
         })
     }
 }
@@ -193,12 +311,14 @@ impl Agent for ReviewerAgent {
 pub struct Controller {
     /// Maximum number of full pipeline retries before giving up.
     pub max_retries: usize,
+    /// The LLM backend shared by all agents in the pipeline.
+    pub llm: Arc<dyn LlmProvider>,
 }
 
 impl Controller {
-    /// Create a new [`Controller`] with the given retry limit.
-    pub fn new(max_retries: usize) -> Self {
-        Self { max_retries }
+    /// Create a new [`Controller`] with the given retry limit and LLM provider.
+    pub fn new(max_retries: usize, llm: Arc<dyn LlmProvider>) -> Self {
+        Self { max_retries, llm }
     }
 
     /// Run the full Planner → Coder → Reviewer pipeline for the given `prompt`.
@@ -206,9 +326,9 @@ impl Controller {
     /// Returns a [`Vec`] of [`AgentOutput`] from each stage of the final
     /// successful (or last attempted) run.
     pub async fn run(&self, prompt: &str) -> Result<Vec<AgentOutput>, AgentError> {
-        let planner = PlannerAgent;
-        let coder = CoderAgent;
-        let reviewer = ReviewerAgent;
+        let planner = LlmPlannerAgent { llm: Arc::clone(&self.llm) };
+        let coder = LlmCoderAgent { llm: Arc::clone(&self.llm) };
+        let reviewer = LlmReviewerAgent { llm: Arc::clone(&self.llm) };
 
         let mut attempt = 0;
 
@@ -241,7 +361,7 @@ impl Controller {
             let context_for_reviewer = serde_json::to_string(&code_output.payload)?;
             let review = reviewer.execute(&context_for_reviewer).await?;
             if !review.success {
-                warn!(role = %review.role, "Reviewer failed; retrying pipeline");
+                warn!(role = %review.role, "Reviewer rejected; retrying pipeline");
                 if attempt >= self.max_retries {
                     return Err(AgentError::MaxRetriesExceeded(self.max_retries));
                 }
@@ -262,19 +382,70 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::{ChunkStream, LlmError, LlmMessage, LlmProvider, LlmResponse, StreamChunk};
+    use futures::stream;
+    use std::sync::Arc;
+
+    /// A deterministic mock LLM provider for unit tests.
+    /// Returns canned JSON responses appropriate for each agent's system prompt.
+    struct MockLlmProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for MockLlmProvider {
+        fn provider_name(&self) -> &str {
+            "mock"
+        }
+        fn model_name(&self) -> &str {
+            "mock-model"
+        }
+
+        async fn complete(&self, messages: &[LlmMessage]) -> Result<LlmResponse, LlmError> {
+            let sys = messages
+                .iter()
+                .find(|m| m.role == crate::llm::MessageRole::System)
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+
+            let content = if sys.contains("planning agent") {
+                r#"{"steps":["Analyse codebase","Generate diff","Run tests"],"affected_files":["src/main.rs"],"success_criteria":"tests pass","complexity":"low"}"#
+            } else if sys.contains("software engineer") {
+                r#"{"diff":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-// TODO\n+// Done","files_changed":1,"explanation":"Replaced placeholder","language":"rust"}"#
+            } else {
+                r#"{"approved":true,"issues":[],"security_concerns":[],"recommendation":"LGTM"}"#
+            };
+
+            Ok(LlmResponse {
+                content: content.to_string(),
+                model: "mock-model".to_string(),
+                total_tokens: Some(100),
+            })
+        }
+
+        async fn stream(&self, _messages: &[LlmMessage]) -> Result<ChunkStream, LlmError> {
+            Ok(Box::pin(stream::iter(vec![Ok(StreamChunk {
+                delta: "result".to_string(),
+                finished: true,
+            })])))
+        }
+    }
 
     #[tokio::test]
     async fn test_controller_runs_all_agents() {
-        let controller = Controller::new(3);
-        let outputs = controller.run("add a hello world function").await.unwrap();
+        let controller = Controller::new(3, Arc::new(MockLlmProvider));
+        let outputs = controller
+            .run("add a hello world function")
+            .await
+            .unwrap();
         assert_eq!(outputs.len(), 3);
         assert!(outputs.iter().all(|o| o.success));
     }
 
     #[tokio::test]
     async fn test_agent_roles() {
-        assert_eq!(PlannerAgent.role(), AgentRole::Planner);
-        assert_eq!(CoderAgent.role(), AgentRole::Coder);
-        assert_eq!(ReviewerAgent.role(), AgentRole::Reviewer);
+        let llm: Arc<dyn LlmProvider> = Arc::new(MockLlmProvider);
+        assert_eq!(LlmPlannerAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Planner);
+        assert_eq!(LlmCoderAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Coder);
+        assert_eq!(LlmReviewerAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Reviewer);
     }
 }
+

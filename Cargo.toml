@@ -37,6 +37,18 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# HTTP client (used by LLM providers)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Async stream utilities
+futures = "0.3"
+
+# Config file parsing
+toml = "0.8"
+
+# Home/config directory resolution
+dirs = "5"
+
 # CLI utilities
 clap = { version = "4", features = ["derive", "env"] }
 inquire = "0.7"
