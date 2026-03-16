@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 // ──────────────────────────────────────────────
@@ -75,6 +76,24 @@ pub struct AgentOutput {
     pub payload: serde_json::Value,
     /// Whether the agent considers its sub-task complete.
     pub success: bool,
+}
+
+// ──────────────────────────────────────────────
+// Pipeline progress events
+// ──────────────────────────────────────────────
+
+/// Events emitted by [`Controller::run_with_progress`] as the pipeline runs.
+///
+/// Consumers can display real-time status (e.g. spinners) by processing these
+/// events on the receiving end of a [`tokio::sync::mpsc`] channel.
+#[derive(Debug, Clone)]
+pub enum PipelineEvent {
+    /// An agent stage has started.  Callers should show a spinner / "thinking" indicator.
+    StageStarted { role: AgentRole },
+    /// An agent stage completed successfully.  `output` contains the real summary.
+    StageCompleted { output: AgentOutput },
+    /// The pipeline failed (either an agent error or max retries exceeded).
+    PipelineFailed { error: String },
 }
 
 // ──────────────────────────────────────────────
@@ -326,9 +345,32 @@ impl Controller {
     /// Returns a [`Vec`] of [`AgentOutput`] from each stage of the final
     /// successful (or last attempted) run.
     pub async fn run(&self, prompt: &str) -> Result<Vec<AgentOutput>, AgentError> {
+        self.run_with_progress(prompt, None).await
+    }
+
+    /// Run the pipeline, optionally sending [`PipelineEvent`]s to `tx`.
+    ///
+    /// Each agent emits a [`PipelineEvent::StageStarted`] before it calls the
+    /// LLM and a [`PipelineEvent::StageCompleted`] (or [`PipelineEvent::PipelineFailed`])
+    /// on completion.  Dropped send errors are silently ignored so that callers
+    /// can close the receiver early without aborting the pipeline.
+    pub async fn run_with_progress(
+        &self,
+        prompt: &str,
+        tx: Option<mpsc::Sender<PipelineEvent>>,
+    ) -> Result<Vec<AgentOutput>, AgentError> {
         let planner = LlmPlannerAgent { llm: Arc::clone(&self.llm) };
         let coder = LlmCoderAgent { llm: Arc::clone(&self.llm) };
         let reviewer = LlmReviewerAgent { llm: Arc::clone(&self.llm) };
+
+        // Helper: fire an event, ignoring a closed receiver.
+        macro_rules! send {
+            ($event:expr) => {
+                if let Some(ref tx) = tx {
+                    let _ = tx.send($event).await;
+                }
+            };
+        }
 
         let mut attempt = 0;
 
@@ -337,36 +379,51 @@ impl Controller {
             info!(attempt, "Starting pipeline run");
 
             // ── Stage 1: Planning ────────────────────────────────────────────
-            let plan = planner.execute(prompt).await?;
+            send!(PipelineEvent::StageStarted { role: AgentRole::Planner });
+            let plan = planner.execute(prompt).await.map_err(|e| {
+                AgentError::ExecutionFailed { role: AgentRole::Planner, message: e.to_string() }
+            })?;
             if !plan.success {
                 warn!(role = %plan.role, "Planner reported failure; retrying");
+                send!(PipelineEvent::PipelineFailed { error: format!("Planner failed: {}", plan.summary) });
                 if attempt >= self.max_retries {
                     return Err(AgentError::MaxRetriesExceeded(self.max_retries));
                 }
                 continue;
             }
+            send!(PipelineEvent::StageCompleted { output: plan.clone() });
 
             // ── Stage 2: Coding ──────────────────────────────────────────────
+            send!(PipelineEvent::StageStarted { role: AgentRole::Coder });
             let context_for_coder = serde_json::to_string(&plan.payload)?;
-            let code_output = coder.execute(&context_for_coder).await?;
+            let code_output = coder.execute(&context_for_coder).await.map_err(|e| {
+                AgentError::ExecutionFailed { role: AgentRole::Coder, message: e.to_string() }
+            })?;
             if !code_output.success {
                 warn!(role = %code_output.role, "Coder reported failure; retrying");
+                send!(PipelineEvent::PipelineFailed { error: format!("Coder failed: {}", code_output.summary) });
                 if attempt >= self.max_retries {
                     return Err(AgentError::MaxRetriesExceeded(self.max_retries));
                 }
                 continue;
             }
+            send!(PipelineEvent::StageCompleted { output: code_output.clone() });
 
             // ── Stage 3: Review ──────────────────────────────────────────────
+            send!(PipelineEvent::StageStarted { role: AgentRole::Reviewer });
             let context_for_reviewer = serde_json::to_string(&code_output.payload)?;
-            let review = reviewer.execute(&context_for_reviewer).await?;
+            let review = reviewer.execute(&context_for_reviewer).await.map_err(|e| {
+                AgentError::ExecutionFailed { role: AgentRole::Reviewer, message: e.to_string() }
+            })?;
             if !review.success {
                 warn!(role = %review.role, "Reviewer rejected; retrying pipeline");
+                send!(PipelineEvent::PipelineFailed { error: format!("Reviewer rejected: {}", review.summary) });
                 if attempt >= self.max_retries {
                     return Err(AgentError::MaxRetriesExceeded(self.max_retries));
                 }
                 continue;
             }
+            send!(PipelineEvent::StageCompleted { output: review.clone() });
 
             // ── All stages passed ────────────────────────────────────────────
             info!(attempt, "Pipeline converged successfully");

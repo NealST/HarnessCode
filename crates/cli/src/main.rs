@@ -13,10 +13,10 @@
 use clap::{Parser, Subcommand};
 use harnesscode_core::{
     config::{
-        default_provider, load_config, project_config_path, user_config_path,
+        load_config, project_config_path, user_config_path,
         HarnessConfig, ProfileConfig, PROJECT_CONFIG_FILE,
     },
-    multi_agent::Controller,
+    multi_agent::{AgentRole, Controller, PipelineEvent},
     risk_management::{RiskError, RiskManager},
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -306,6 +306,68 @@ fn cmd_config_show() {
 }
 
 // ──────────────────────────────────────────────
+// Formatted result display
+// ──────────────────────────────────────────────
+
+/// Print a colourised summary of all pipeline outputs.
+fn print_pipeline_result(outputs: &[harnesscode_core::multi_agent::AgentOutput]) {
+    println!("🎉  Pipeline completed successfully!\n");
+
+    for output in outputs {
+        let icon = if output.success { "✅" } else { "❌" };
+        println!("  {icon}  [{:<8}]  {}", output.role.to_string(), output.summary);
+
+        // ── Planner: show numbered steps if present ──────────────────────────
+        if output.role == harnesscode_core::multi_agent::AgentRole::Planner {
+            if let Some(steps) = output.payload.get("steps").and_then(|s| s.as_array()) {
+                for (i, step) in steps.iter().enumerate() {
+                    let text = step.as_str().unwrap_or_default();
+                    println!("        {}. {}", i + 1, text);
+                }
+            }
+        }
+
+        // ── Coder: colourised diff ────────────────────────────────────────────
+        if output.role == harnesscode_core::multi_agent::AgentRole::Coder {
+            if let Some(diff) = output.payload.get("diff").and_then(|d| d.as_str()) {
+                println!();
+                for line in diff.lines() {
+                    if line.starts_with('+') && !line.starts_with("+++") {
+                        // Green for additions
+                        println!("        \x1b[32m{line}\x1b[0m");
+                    } else if line.starts_with('-') && !line.starts_with("---") {
+                        // Red for deletions
+                        println!("        \x1b[31m{line}\x1b[0m");
+                    } else if line.starts_with("@@") {
+                        // Cyan for hunk headers
+                        println!("        \x1b[36m{line}\x1b[0m");
+                    } else {
+                        println!("        {line}");
+                    }
+                }
+                println!();
+            }
+        }
+
+        // ── Reviewer: colour verdict ──────────────────────────────────────────
+        if output.role == harnesscode_core::multi_agent::AgentRole::Reviewer {
+            let verdict_colour = if output.success { "\x1b[32m" } else { "\x1b[31m" };
+            println!("        {verdict_colour}Verdict: {}\x1b[0m", output.summary);
+            if let Some(issues) = output.payload.get("issues").and_then(|i| i.as_array()) {
+                if !issues.is_empty() {
+                    println!("        Issues:");
+                    for issue in issues {
+                        println!("          • {}", issue.as_str().unwrap_or_default());
+                    }
+                }
+            }
+        }
+
+        println!();
+    }
+}
+
+// ──────────────────────────────────────────────
 // Main
 // ──────────────────────────────────────────────
 
@@ -374,24 +436,6 @@ async fn main() {
     info!(task = %task, "Task received");
     println!();
 
-    // ── Stage spinners (visual feedback) ─────────────────────────────────────
-    {
-        let pb = make_spinner("🧠  Planner is thinking…");
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        pb.finish_with_message("✅  Planner finished — execution plan ready.");
-    }
-    {
-        let pb = make_spinner("💻  Coder is working…");
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        pb.finish_with_message("✅  Coder finished — code changes generated.");
-    }
-    {
-        let pb = make_spinner("🔍  Reviewer is checking output…");
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        pb.finish_with_message("✅  Reviewer approved — all checks passed.");
-    }
-    println!();
-
     // ── LLM pipeline ─────────────────────────────────────────────────────────
     let llm = match harnesscode_core::config::provider_for_profile(cli.profile.as_deref()) {
         Ok(p) => p,
@@ -403,27 +447,68 @@ async fn main() {
     };
 
     let controller = Controller::new(3, llm);
-    match controller.run(&task).await {
-        Ok(outputs) => {
-            println!("🎉  Pipeline completed successfully!\n");
-            for output in &outputs {
-                println!(
-                    "  [{:>8}] {} — {}",
-                    output.role,
-                    if output.success { "✅" } else { "❌" },
-                    output.summary
-                );
-            }
-            println!();
-            println!("📄  Full output (JSON):");
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&outputs).unwrap_or_default()
-            );
-        }
-        Err(e) => {
-            error!("Pipeline failed: {e}");
-            eprintln!("💥  Pipeline failed: {e}");
+
+    // Spawn the pipeline on a separate task; receive progress events on this thread.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(16);
+    let task_clone = task.clone();
+    let pipeline = tokio::spawn(async move {
+        controller.run_with_progress(&task_clone, Some(tx)).await
+    });
+
+    // Label/icon for each agent role.
+    fn stage_label(role: AgentRole) -> (&'static str, &'static str) {
+        match role {
+            AgentRole::Planner  => ("🧠", "Planner "),
+            AgentRole::Coder    => ("💻", "Coder   "),
+            AgentRole::Reviewer => ("🔍", "Reviewer"),
         }
     }
+
+    let mut current_pb: Option<ProgressBar> = None;
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            PipelineEvent::StageStarted { role } => {
+                // Finish any existing spinner before creating a new one.
+                if let Some(pb) = current_pb.take() {
+                    pb.finish_and_clear();
+                }
+                let (icon, label) = stage_label(role);
+                let pb = make_spinner(&format!("{icon}  {label}   正在处理…"));
+                current_pb = Some(pb);
+            }
+            PipelineEvent::StageCompleted { output } => {
+                if let Some(pb) = current_pb.take() {
+                    let (icon, label) = stage_label(output.role);
+                    pb.finish_with_message(format!(
+                        "✅  {icon}  {label}   {}",
+                        output.summary
+                    ));
+                }
+            }
+            PipelineEvent::PipelineFailed { error } => {
+                if let Some(pb) = current_pb.take() {
+                    pb.finish_with_message(format!("❌  {error}"));
+                }
+            }
+        }
+    }
+
+    // Collect the final result.
+    let outputs = match pipeline.await {
+        Ok(Ok(outputs)) => outputs,
+        Ok(Err(e)) => {
+            error!("Pipeline failed: {e}");
+            eprintln!("💥  Pipeline failed: {e}");
+            return;
+        }
+        Err(e) => {
+            error!("Pipeline task panicked: {e}");
+            eprintln!("💥  Internal error: {e}");
+            return;
+        }
+    };
+
+    println!();
+    print_pipeline_result(&outputs);
 }
