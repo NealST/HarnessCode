@@ -5,6 +5,11 @@
       "source": "leonardomso/rust-skills",
       "sourceType": "github",
       "computedHash": "b675f39d80df3494fa0c78d98dd7fe420a08ab4704e176422200bad00a63fd08"
+    },
+    "tauri": {
+      "source": "smithery.ai",
+      "sourceType": "well-known",
+      "computedHash": "8846df779beba33d583a1712ecfb18a3dc0a542ad1c95643a2797e0eb44f43ab"
     }
   }
 }

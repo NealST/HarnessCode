@@ -1,150 +1,23 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import PipelineRunView, {
+  type PipelineEventDto,
+  type PipelineDoneEvent,
+} from "@/components/PipelineRunView";
+import RunHistoryPanel from "@/components/RunHistoryPanel";
 
 // ──────────────────────────────────────────────
-// Types that mirror the Rust AgentTaskResponse enum
-// ──────────────────────────────────────────────
-
-interface AgentOutput {
-  role: "planner" | "coder" | "reviewer";
-  summary: string;
-  payload: unknown;
-  success: boolean;
-}
-
-type AgentTaskResponse =
-  | { card_type: "code_diff"; outputs: AgentOutput[]; summary: string }
-  | { card_type: "risk_alert"; filepath: string; reason: string; blocked: boolean }
-  | { card_type: "error"; message: string };
-
-// ──────────────────────────────────────────────
-// Message model for the chat log
+// Chat message model
 // ──────────────────────────────────────────────
 
 interface ChatMessage {
   id: string;
   type: "user" | "agent";
   content: string;
-  response?: AgentTaskResponse;
-  loading?: boolean;
-}
-
-// ──────────────────────────────────────────────
-// Generative UI Cards
-// ──────────────────────────────────────────────
-
-function CodeDiffCard({
-  outputs,
-  summary,
-}: {
-  outputs: AgentOutput[];
-  summary: string;
-}) {
-  return (
-    <div className="card border-brand-800 bg-gray-900/80 space-y-3">
-      <div className="flex items-center gap-2">
-        <span className="text-green-400 text-lg">✅</span>
-        <h3 className="font-semibold text-brand-300">Pipeline Complete</h3>
-      </div>
-      <p className="text-sm text-gray-400">{summary}</p>
-      <div className="space-y-2">
-        {outputs.map((o) => (
-          <div
-            key={o.role}
-            className="flex items-start gap-3 rounded-lg bg-gray-800 p-3 text-sm"
-          >
-            <span className="mt-0.5 text-base">
-              {o.role === "planner" ? "🧠" : o.role === "coder" ? "💻" : "🔍"}
-            </span>
-            <div>
-              <span className="font-medium capitalize text-brand-300">
-                {o.role}
-              </span>
-              <p className="text-gray-300">{o.summary}</p>
-            </div>
-            <span className="ml-auto text-xs">
-              {o.success ? (
-                <span className="text-green-400">passed</span>
-              ) : (
-                <span className="text-red-400">failed</span>
-              )}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function RiskAlertCard({
-  filepath,
-  reason,
-  blocked,
-}: {
-  filepath: string;
-  reason: string;
-  blocked: boolean;
-}) {
-  return (
-    <div
-      className={`card space-y-2 ${
-        blocked ? "border-red-800 bg-red-950/40" : "border-yellow-800 bg-yellow-950/30"
-      }`}
-    >
-      <div className="flex items-center gap-2">
-        <span className="text-lg">{blocked ? "🚫" : "⚠️"}</span>
-        <h3
-          className={`font-semibold ${
-            blocked ? "text-red-400" : "text-yellow-400"
-          }`}
-        >
-          {blocked ? "HIGH RISK — Operation Blocked" : "Risk Warning"}
-        </h3>
-      </div>
-      <p className="text-sm text-gray-300">
-        File:{" "}
-        <code className="rounded bg-gray-800 px-1 py-0.5 text-xs text-brand-300">
-          {filepath}
-        </code>
-      </p>
-      <p className="text-sm text-gray-400">{reason}</p>
-      {blocked && (
-        <p className="text-xs text-red-400">
-          Explicit confirmation required before proceeding.
-        </p>
-      )}
-    </div>
-  );
-}
-
-function ErrorCard({ message }: { message: string }) {
-  return (
-    <div className="card border-red-800 bg-red-950/30 space-y-1">
-      <div className="flex items-center gap-2">
-        <span className="text-lg">💥</span>
-        <h3 className="font-semibold text-red-400">Error</h3>
-      </div>
-      <p className="text-sm text-gray-400">{message}</p>
-    </div>
-  );
-}
-
-function LoadingCard() {
-  return (
-    <div className="card border-brand-900 bg-gray-900/60 space-y-2">
-      <div className="flex items-center gap-3">
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-brand-400 border-t-transparent" />
-        <span className="text-sm text-brand-300">
-          Running multi-agent pipeline…
-        </span>
-      </div>
-      <div className="space-y-1.5 pl-7 text-xs text-gray-500">
-        <p>🧠 Planner is analysing the task…</p>
-        <p>💻 Coder is generating changes…</p>
-        <p>🔍 Reviewer is validating output…</p>
-      </div>
-    </div>
-  );
+  /** Set while streaming; removed when done */
+  pipelineEvents?: PipelineEventDto[];
+  pipelineDone?: PipelineDoneEvent;
 }
 
 // ──────────────────────────────────────────────
@@ -162,83 +35,106 @@ export default function App() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [historyKey, setHistoryKey] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const unlistenRef = useRef<UnlistenFn[]>([]);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const prompt = input.trim();
-    if (!prompt || loading) return;
+  // Cleanup event listeners on unmount
+  useEffect(() => {
+    return () => {
+      unlistenRef.current.forEach((fn) => fn());
+    };
+  }, []);
 
-    const userMsgId = crypto.randomUUID();
-    const agentMsgId = crypto.randomUUID();
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      const prompt = input.trim();
+      if (!prompt || loading) return;
 
-    // Append user message + loading placeholder
-    setMessages((prev) => [
-      ...prev,
-      { id: userMsgId, type: "user", content: prompt },
-      { id: agentMsgId, type: "agent", content: "", loading: true },
-    ]);
-    setInput("");
-    setLoading(true);
+      const userMsgId = crypto.randomUUID();
+      const agentMsgId = crypto.randomUUID();
 
-    try {
-      const response = await invoke<AgentTaskResponse>("invoke_agent_task", {
-        prompt,
+      setMessages((prev) => [
+        ...prev,
+        { id: userMsgId, type: "user", content: prompt },
+        { id: agentMsgId, type: "agent", content: "", pipelineEvents: [] },
+      ]);
+      setInput("");
+      setLoading(true);
+
+      // Tear down any leftover listeners from a prior run
+      unlistenRef.current.forEach((fn) => fn());
+      unlistenRef.current = [];
+
+      const appendEvent = (ev: PipelineEventDto) => {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === agentMsgId
+              ? { ...m, pipelineEvents: [...(m.pipelineEvents ?? []), ev] }
+              : m
+          )
+        );
+      };
+
+      const ul1 = await listen<PipelineEventDto>("pipeline:event", (e) => {
+        appendEvent(e.payload);
       });
 
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === agentMsgId
-            ? {
-                ...m,
-                loading: false,
-                content: getResponseSummary(response),
-                response,
-              }
-            : m
-        )
-      );
-    } catch (err) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === agentMsgId
-            ? {
-                ...m,
-                loading: false,
-                content: "An unexpected error occurred.",
-                response: {
-                  card_type: "error",
-                  message: String(err),
-                },
-              }
-            : m
-        )
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
+      const ul2 = await listen<PipelineDoneEvent>("pipeline:done", (e) => {
+        const done = e.payload;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === agentMsgId
+              ? {
+                  ...m,
+                  pipelineDone: done,
+                  content:
+                    done.status === "ok"
+                      ? `Pipeline completed — ${done.stages.length} stages passed.`
+                      : `Pipeline failed: ${done.message}`,
+                }
+              : m
+          )
+        );
+        // Refresh history sidebar after run completes
+        setHistoryKey((k) => k + 1);
+        setLoading(false);
+        // Detach listeners; they're one-shot per run
+        ul1();
+        ul2();
+      });
 
-  function getResponseSummary(r: AgentTaskResponse): string {
-    switch (r.card_type) {
-      case "code_diff":
-        return r.summary;
-      case "risk_alert":
-        return r.blocked
-          ? `Operation blocked: high-risk file '${r.filepath}'.`
-          : `Risk warning for '${r.filepath}'.`;
-      case "error":
-        return r.message;
-    }
-  }
+      unlistenRef.current = [ul1, ul2];
+
+      try {
+        await invoke("start_pipeline", { prompt, projectDir: null });
+      } catch (err) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === agentMsgId
+              ? {
+                  ...m,
+                  pipelineEvents: undefined,
+                  pipelineDone: { status: "err", message: String(err) },
+                  content: `Failed to start pipeline: ${err}`,
+                }
+              : m
+          )
+        );
+        setLoading(false);
+      }
+    },
+    [input, loading]
+  );
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-screen flex-col overflow-hidden">
       {/* ── Header ── */}
       <header className="flex items-center gap-3 border-b border-gray-800 bg-gray-900/80 px-6 py-4 backdrop-blur">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-base font-bold text-white">
@@ -246,109 +142,103 @@ export default function App() {
         </div>
         <div>
           <h1 className="text-sm font-semibold text-white">HarnessCode</h1>
-          <p className="text-xs text-gray-400">Safe AI Coding Agent · Powered by Cybernetics</p>
+          <p className="text-xs text-gray-400">
+            Safe AI Coding Agent · Powered by Cybernetics
+          </p>
         </div>
         <div className="ml-auto flex items-center gap-1.5">
-          <div className="h-2 w-2 rounded-full bg-green-400 animate-pulse" />
-          <span className="text-xs text-gray-400">Online</span>
+          <div
+            className={`h-2 w-2 rounded-full ${
+              loading ? "animate-pulse bg-yellow-400" : "bg-green-400"
+            }`}
+          />
+          <span className="text-xs text-gray-400">
+            {loading ? "Running…" : "Ready"}
+          </span>
         </div>
       </header>
 
-      {/* ── Chat log ── */}
-      <main className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
-        <div className="mx-auto max-w-3xl space-y-4">
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.type === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div
-                className={`max-w-[80%] space-y-2 ${
-                  msg.type === "user" ? "items-end" : "items-start"
-                }`}
-              >
-                {/* Bubble */}
-                {(msg.loading || msg.content) && (
-                  <div
-                    className={`rounded-2xl px-4 py-2.5 text-sm ${
-                      msg.type === "user"
-                        ? "bg-brand-700 text-white rounded-br-md"
-                        : "bg-gray-800 text-gray-200 rounded-bl-md"
-                    }`}
-                  >
-                    {msg.loading ? (
-                      <span className="text-gray-400 italic">Thinking…</span>
-                    ) : (
-                      msg.content
+      {/* ── Body (chat + history sidebar) ── */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* ── Chat log ── */}
+        <main className="flex flex-1 flex-col overflow-hidden">
+          <div className="flex-1 overflow-y-auto px-4 py-6">
+            <div className="mx-auto max-w-3xl space-y-4">
+              {messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`flex ${
+                    msg.type === "user" ? "justify-end" : "justify-start"
+                  }`}
+                >
+                  <div className="max-w-[85%] space-y-2">
+                    {/* Text bubble — show when there's text and no live pipeline view */}
+                    {msg.content && !msg.pipelineEvents && (
+                      <div
+                        className={`rounded-2xl px-4 py-2.5 text-sm ${
+                          msg.type === "user"
+                            ? "bg-brand-700 text-white rounded-br-md"
+                            : "bg-gray-800 text-gray-200 rounded-bl-md"
+                        }`}
+                      >
+                        {msg.content}
+                      </div>
                     )}
-                  </div>
-                )}
 
-                {/* Generative UI card */}
-                {msg.loading && <LoadingCard />}
-                {!msg.loading && msg.response && (
-                  <div className="w-full">
-                    {msg.response.card_type === "code_diff" && (
-                      <CodeDiffCard
-                        outputs={msg.response.outputs}
-                        summary={msg.response.summary}
+                    {/* Live pipeline card — while running or on first render after start */}
+                    {msg.pipelineEvents !== undefined && (
+                      <PipelineRunView
+                        events={msg.pipelineEvents}
+                        done={msg.pipelineDone ?? null}
+                        onDismiss={() =>
+                          setMessages((prev) =>
+                            prev.map((m) =>
+                              m.id === msg.id
+                                ? { ...m, pipelineEvents: undefined }
+                                : m
+                            )
+                          )
+                        }
                       />
-                    )}
-                    {msg.response.card_type === "risk_alert" && (
-                      <RiskAlertCard
-                        filepath={msg.response.filepath}
-                        reason={msg.response.reason}
-                        blocked={msg.response.blocked}
-                      />
-                    )}
-                    {msg.response.card_type === "error" && (
-                      <ErrorCard message={msg.response.message} />
                     )}
                   </div>
-                )}
-              </div>
+                </div>
+              ))}
+              <div ref={bottomRef} />
             </div>
-          ))}
-          <div ref={bottomRef} />
-        </div>
-      </main>
+          </div>
 
-      {/* ── Input area ── */}
-      <footer className="border-t border-gray-800 bg-gray-900/80 px-4 py-4 backdrop-blur">
-        <form
-          onSubmit={handleSubmit}
-          className="mx-auto flex max-w-3xl items-end gap-3"
-        >
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit(e as unknown as React.FormEvent);
-              }
-            }}
-            placeholder="What do you want to build or fix today? (Enter to send, Shift+Enter for newline)"
-            rows={2}
-            className="input-text resize-none"
-            disabled={loading}
-          />
-          <button
-            type="submit"
-            disabled={!input.trim() || loading}
-            className="btn-primary flex-shrink-0 px-5 py-3"
-          >
-            {loading ? (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-            ) : (
-              <span>Send</span>
-            )}
-          </button>
-        </form>
-        <p className="mx-auto mt-2 max-w-3xl text-center text-xs text-gray-600">
-          HarnessCode v0.1.0 · All operations are sandboxed and risk-checked.
-        </p>
-      </footer>
+          {/* ── Input ── */}
+          <div className="border-t border-gray-800 bg-gray-900/80 px-4 py-4 backdrop-blur">
+            <form
+              onSubmit={handleSubmit}
+              className="mx-auto flex max-w-3xl gap-3"
+            >
+              <input
+                className="input-text flex-1"
+                placeholder={
+                  loading
+                    ? "Pipeline running…"
+                    : "Describe what you'd like to build or fix…"
+                }
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                disabled={loading}
+              />
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={loading || !input.trim()}
+              >
+                {loading ? "Running…" : "Run"}
+              </button>
+            </form>
+          </div>
+        </main>
+
+        {/* ── History sidebar ── */}
+        <RunHistoryPanel refreshKey={historyKey} />
+      </div>
     </div>
   );
 }

@@ -1,93 +1,113 @@
 //! # HarnessCode Desktop — Tauri v2 Backend Library
 //!
-//! This crate exposes [`harnesscode_core`] functionality as Tauri commands
-//! that the React frontend can `invoke()`.
+//! Exposes [`harnesscode_core`] functionality as Tauri commands.
 //!
 //! ## Commands
 //!
 //! | Command | Description |
 //! |---------|-------------|
-//! | [`invoke_agent_task`]   | Run the full multi-agent pipeline for a given prompt |
-//! | [`get_config`]          | Read the resolved configuration for the settings panel |
-//! | [`save_config_profile`] | Persist a profile into `~/.harnesscode/config.toml` |
+//! | [`commands::start_pipeline`]      | Kick off the multi-agent pipeline; streams progress via Tauri events |
+//! | [`commands::cancel_pipeline`]     | Request cancellation of the running pipeline (best-effort) |
+//! | [`commands::get_config`]          | Read the resolved configuration for the settings panel |
+//! | [`commands::save_config_profile`] | Persist a profile into `~/.harnesscode/config.toml` |
+//! | [`commands::get_run_history`]     | Read past run summaries from `.harnesscode/runs.jsonl` |
 //!
-//! All commands are `async` and return serialisable JSON values so that the
-//! frontend can render the appropriate Generative UI card.
+//! ## Event flow for `start_pipeline`
+//!
+//! ```text
+//! Frontend  invoke("start_pipeline", { prompt, project_dir })
+//!              ↓
+//! Rust      spawns tokio task — calls run_with_progress(prompt, Some(tx))
+//!              ↓  per PipelineEvent
+//!           app.emit("pipeline:event", event)
+//!              ↓  on completion
+//!           app.emit("pipeline:done",  PipelineDoneEvent)
+//!              ↓  per Span (observability, via TauriSpanSink)
+//!           app.emit("pipeline:span",  span)
+//! ```
 
-use harnesscode_core::{
-    config::{default_provider, load_config, user_config_path, HarnessConfig, ProfileConfig},
-    multi_agent::{AgentOutput, Controller},
-};
+pub mod commands;
+pub mod obs;
+
+use harnesscode_core::controller::PipelineEvent;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use tauri::command;
-use tracing::{error, info};
+use tokio::sync::Mutex;
 
 // ──────────────────────────────────────────────
-// Response types
+// Shared app state
 // ──────────────────────────────────────────────
 
-/// Discriminated-union response for the `invoke_agent_task` command.
-/// The frontend renders different UI cards based on the `card_type` field.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "card_type", rename_all = "snake_case")]
-pub enum AgentTaskResponse {
-    /// Pipeline completed successfully — show a Code Diff Card.
-    /// Risk assessment is embedded in `outputs` as an `AgentRole::Risk` entry.
-    CodeDiff {
-        outputs: Vec<AgentOutput>,
-        summary: String,
-    },
-    /// An unexpected error occurred.
-    Error { message: String },
+/// Holds an optional cancellation sender for the currently running pipeline.
+/// Only one pipeline runs at a time from the desktop UI.
+#[derive(Default)]
+pub struct PipelineState {
+    pub cancel_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 // ──────────────────────────────────────────────
-// Config commands (for the GUI settings panel)
+// Event payload types (frontend ↔ backend contract)
 // ──────────────────────────────────────────────
 
-/// DTO for a single profile as seen by the frontend.
+/// Mirrors `PipelineEvent` for JSON serialisation to the frontend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PipelineEventDto {
+    StageStarted { role: String },
+    StageCompleted { role: String, summary: String, success: bool },
+    PipelineFailed { error: String },
+}
+
+impl From<PipelineEvent> for PipelineEventDto {
+    fn from(e: PipelineEvent) -> Self {
+        match e {
+            PipelineEvent::StageStarted { role } => Self::StageStarted {
+                role: role.to_string(),
+            },
+            PipelineEvent::StageCompleted { output } => Self::StageCompleted {
+                role: output.role.to_string(),
+                summary: output.summary.clone(),
+                success: output.success,
+            },
+            PipelineEvent::PipelineFailed { error } => Self::PipelineFailed { error },
+        }
+    }
+}
+
+/// Final result emitted as `"pipeline:done"` when the task finishes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PipelineDoneEvent {
+    Ok { stages: Vec<StageSummary> },
+    Err { message: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StageSummary {
+    pub role: String,
+    pub summary: String,
+    pub success: bool,
+}
+
+// ──────────────────────────────────────────────
+// Config DTOs
+// ──────────────────────────────────────────────
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProfileDto {
     pub name: String,
     pub provider: String,
     pub model: String,
     pub base_url: Option<String>,
-    /// Whether an API key is configured (never exposes the key itself).
     pub has_api_key: bool,
 }
 
-/// Response shape for `get_config`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConfigDto {
     pub default_profile: Option<String>,
     pub profiles: Vec<ProfileDto>,
 }
 
-/// Read the resolved user-level configuration for the settings panel.
-/// The API key value is never sent to the frontend — only whether one is set.
-#[command]
-pub async fn get_config() -> ConfigDto {
-    let cfg = load_config();
-    let profiles = cfg
-        .profiles
-        .into_iter()
-        .map(|(name, p)| ProfileDto {
-            name,
-            provider: p.provider,
-            model: p.model,
-            base_url: p.base_url,
-            has_api_key: p.api_key.is_some(),
-        })
-        .collect();
-    ConfigDto {
-        default_profile: cfg.default_profile,
-        profiles,
-    }
-}
-
 /// DTO sent by the frontend when saving a profile.
-/// The `api_key` field is optional; if absent the existing key is preserved.
 #[derive(Debug, Deserialize)]
 pub struct SaveProfileRequest {
     pub name: String,
@@ -98,95 +118,29 @@ pub struct SaveProfileRequest {
     pub set_as_default: bool,
 }
 
-/// Persist a profile into `~/.harnesscode/config.toml`.
-/// Creates the file and directory if they do not exist.
-#[command]
-pub async fn save_config_profile(req: SaveProfileRequest) -> Result<(), String> {
-    // Load existing user config so we don't overwrite other profiles
-    let user_path = user_config_path().ok_or("Cannot determine home directory")?;
-    let mut cfg: HarnessConfig = if user_path.exists() {
-        let content = std::fs::read_to_string(&user_path).map_err(|e| e.to_string())?;
-        HarnessConfig::from_toml(&content).map_err(|e| e.to_string())?
-    } else {
-        HarnessConfig::default()
-    };
+// ──────────────────────────────────────────────
+// Run history DTO
+// ──────────────────────────────────────────────
 
-    // Merge the incoming profile
-    let existing_key = cfg.profiles.get(&req.name).and_then(|p| p.api_key.clone());
-    cfg.profiles.insert(
-        req.name.clone(),
-        ProfileConfig {
-            provider: req.provider,
-            model: req.model,
-            base_url: req.base_url,
-            // Preserve existing key if the frontend didn't provide a new one
-            api_key: req.api_key.filter(|k| !k.is_empty()).or(existing_key),
-        },
-    );
-
-    if req.set_as_default {
-        cfg.default_profile = Some(req.name);
-    }
-
-    // Write back
-    if let Some(parent) = user_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(&user_path, cfg.to_toml()).map_err(|e| e.to_string())?;
-    info!(path = %user_path.display(), "Config saved");
-    Ok(())
+/// Lightweight summary of a past run for the history panel.
+#[derive(Debug, Serialize)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub prompt: String,
+    /// Total duration in milliseconds.
+    pub duration_ms: u64,
+    /// Total tokens across all stages.
+    pub total_tokens: u32,
+    pub success: bool,
+    /// Unix epoch seconds of the pipeline span start.
+    pub started_at_secs: u64,
 }
 
 // ──────────────────────────────────────────────
-// Tauri commands
+// App builder
 // ──────────────────────────────────────────────
 
-/// Run the full Planner → Coder → Reviewer pipeline for `prompt`.
-///
-/// Returns an [`AgentTaskResponse`] that the frontend uses to decide which
-/// Generative UI card to render.
-#[command]
-pub async fn invoke_agent_task(prompt: String) -> AgentTaskResponse {
-    info!(prompt = %prompt, "invoke_agent_task called from frontend");
-
-    let llm = match default_provider() {
-        Ok(p) => p,
-        Err(e) => {
-            error!("LLM configuration error: {e}");
-            return AgentTaskResponse::Error {
-                message: format!("LLM configuration error: {e}"),
-            };
-        }
-    };
-
-    let controller = Controller::new(3, llm);
-    match controller.run(&prompt).await {
-        Ok(outputs) => {
-            let summary = format!(
-                "Pipeline completed: {} stage(s) passed.",
-                outputs.len()
-            );
-            AgentTaskResponse::CodeDiff { outputs, summary }
-        }
-        Err(e) => {
-            error!("Controller failed: {e}");
-            AgentTaskResponse::Error {
-                message: e.to_string(),
-            }
-        }
-    }
-}
-
-// ──────────────────────────────────────────────
-// App builder — called by main.rs
-// ──────────────────────────────────────────────
-
-/// Build and configure the Tauri application.
-///
-/// This function is called from `main.rs` so that the app setup is tested
-/// independently of the binary entry point.
 pub fn run() {
-    // Initialise tracing for the desktop process
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -197,10 +151,13 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .manage(PipelineState::default())
         .invoke_handler(tauri::generate_handler![
-            invoke_agent_task,
-            get_config,
-            save_config_profile,
+            commands::start_pipeline,
+            commands::cancel_pipeline,
+            commands::get_config,
+            commands::save_config_profile,
+            commands::get_run_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running HarnessCode desktop application");
