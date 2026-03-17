@@ -3,7 +3,10 @@
 //! Configuration is injected externally (from [`crate::config`]) — this provider
 //! never reads environment variables directly.
 
-use super::{ChunkStream, LlmError, LlmMessage, LlmProvider, LlmResponse, MessageRole, StreamChunk};
+use super::{
+    ChunkStream, LlmCompletion, LlmError, LlmMessage, LlmProvider, LlmResponse,
+    MessageRole, StreamChunk, ToolCall, ToolDef,
+};
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use reqwest::Client;
@@ -111,7 +114,9 @@ impl AnthropicProvider {
                 role: match m.role {
                     MessageRole::User => "user",
                     MessageRole::Assistant => "assistant",
-                    MessageRole::System => unreachable!(),
+                    // System messages are filtered above; Tool-role messages
+                    // are handled via complete_with_tools, not this path.
+                    MessageRole::System | MessageRole::Tool => unreachable!(),
                 },
                 content: &m.content,
             })
@@ -165,15 +170,20 @@ impl LlmProvider for AnthropicProvider {
             .collect::<Vec<_>>()
             .join("");
 
-        let total_tokens = response
-            .usage
-            .map(|u| u.input_tokens + u.output_tokens);
+        let (prompt_tokens, completion_tokens, total_tokens) = response.usage
+            .map(|u| {
+                let total = u.input_tokens + u.output_tokens;
+                (Some(u.input_tokens), Some(u.output_tokens), Some(total))
+            })
+            .unwrap_or((None, None, None));
 
         debug!(tokens = ?total_tokens, "Anthropic completion done");
 
         Ok(LlmResponse {
             content,
             model: response.model,
+            prompt_tokens,
+            completion_tokens,
             total_tokens,
         })
     }
@@ -233,5 +243,114 @@ impl LlmProvider for AnthropicProvider {
         });
 
         Ok(Box::pin(chunk_stream))
+    }
+
+    async fn complete_with_tools(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[ToolDef],
+    ) -> Result<LlmCompletion, LlmError> {
+        info!(model = %self.model, tools = tools.len(), "Anthropic: complete_with_tools");
+
+        // Extract system message (Anthropic keeps it separate).
+        let system = messages
+            .iter()
+            .find(|m| m.role == MessageRole::System)
+            .map(|m| m.content.as_str());
+
+        // Serialise conversation turns — tool use messages have special shapes.
+        let api_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|m| m.role != MessageRole::System)
+            .map(|m| match m.role {
+                // Tool result: Anthropic uses a content-block list inside a "user" turn.
+                MessageRole::Tool => serde_json::json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
+                        "content": m.content,
+                        "is_error": m.is_error.unwrap_or(false),
+                    }]
+                }),
+                // Assistant turn that contains tool_use blocks.
+                MessageRole::Assistant if m.tool_calls.is_some() => {
+                    let blocks: Vec<serde_json::Value> = m.tool_calls.as_ref().unwrap().iter().map(|tc| {
+                        serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        })
+                    }).collect();
+                    serde_json::json!({ "role": "assistant", "content": blocks })
+                }
+                MessageRole::User      => serde_json::json!({ "role": "user",      "content": m.content }),
+                MessageRole::Assistant => serde_json::json!({ "role": "assistant", "content": m.content }),
+                MessageRole::System    => unreachable!(),
+            })
+            .collect();
+
+        // Serialise tool definitions — Anthropic uses `input_schema` instead of `parameters`.
+        let api_tools: Vec<serde_json::Value> = tools.iter().map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.parameters,
+            })
+        }).collect();
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": DEFAULT_MAX_TOKENS,
+            "messages": api_messages,
+            "tools": api_tools,
+        });
+        if let Some(sys) = system {
+            body["system"] = serde_json::Value::String(sys.to_string());
+        }
+
+        let resp = self.client
+            .post(API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", API_VERSION)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let msg = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api { status: status.as_u16(), message: msg });
+        }
+
+        // Parse the response — could be text blocks or tool_use blocks.
+        let raw: serde_json::Value = resp.json().await?;
+        let stop_reason = raw["stop_reason"].as_str().unwrap_or("end_turn");
+        let content = raw["content"].as_array().cloned().unwrap_or_default();
+
+        let prompt_tokens = raw["usage"]["input_tokens"].as_u64().map(|v| v as u32);
+        let completion_tokens = raw["usage"]["output_tokens"].as_u64().map(|v| v as u32);
+
+        if stop_reason == "tool_use" {
+            let calls: Vec<ToolCall> = content
+                .iter()
+                .filter(|b| b["type"] == "tool_use")
+                .map(|b| ToolCall {
+                    id: b["id"].as_str().unwrap_or("").to_string(),
+                    name: b["name"].as_str().unwrap_or("").to_string(),
+                    arguments: b["input"].clone(),
+                })
+                .collect();
+            Ok(LlmCompletion::NeedTools { calls, prompt_tokens, completion_tokens })
+        } else {
+            let text: String = content
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("");
+            Ok(LlmCompletion::Done { text, prompt_tokens, completion_tokens })
+        }
     }
 }

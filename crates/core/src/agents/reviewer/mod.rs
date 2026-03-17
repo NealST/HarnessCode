@@ -1,0 +1,54 @@
+//! Reviewer agent — validates correctness and decides pass/fail.
+
+pub mod context;
+
+use super::{parse_json_or_wrap, simple_complete, Agent, AgentError, AgentOutput, AgentRole};
+use crate::llm::LlmProvider;
+use crate::observability::TokenUsage;
+use std::sync::Arc;
+use tracing::info;
+
+/// Reviewer agent backed by an LLM.
+///
+/// Receives the combined code-changes + risk-assessment context and returns a
+/// structured review verdict (`approved`, `issues`, `security_concerns`, …).
+pub struct LlmReviewerAgent {
+    pub llm: Arc<dyn LlmProvider>,
+}
+
+#[async_trait::async_trait]
+impl Agent for LlmReviewerAgent {
+    fn role(&self) -> AgentRole {
+        AgentRole::Reviewer
+    }
+
+    async fn execute(&self, review_context: &str) -> Result<AgentOutput, AgentError> {
+        info!(role = %AgentRole::Reviewer, "Reviewing generated code changes");
+
+        let response = simple_complete(
+            &self.llm,
+            context::SYSTEM,
+            context::user_message(review_context),
+        )
+        .await?;
+        let tokens = Some(TokenUsage::from(&response));
+        let payload = parse_json_or_wrap(&response.content);
+
+        let approved = payload
+            .get("approved")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let recommendation = payload
+            .get("recommendation")
+            .and_then(|r| r.as_str())
+            .unwrap_or(if approved { "Approved" } else { "Rejected — revisions required" });
+
+        Ok(AgentOutput {
+            role: AgentRole::Reviewer,
+            summary: recommendation.to_string(),
+            payload,
+            success: approved,
+            tokens,
+        })
+    }
+}

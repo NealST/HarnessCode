@@ -49,6 +49,9 @@ toml = "0.8"
 # Home/config directory resolution
 dirs = "5"
 
+# UUID generation (for observability span/run IDs)
+uuid = { version = "1", features = ["v4", "serde"] }
+
 # CLI utilities
 clap = { version = "4", features = ["derive", "env"] }
 inquire = "0.7"

@@ -7,8 +7,9 @@
 //!
 //! | Command | Description |
 //! |---------|-------------|
-//! | [`invoke_agent_task`] | Run the full multi-agent pipeline for a given prompt |
-//! | [`check_file_risk`]   | Assess the risk of a given file path |
+//! | [`invoke_agent_task`]   | Run the full multi-agent pipeline for a given prompt |
+//! | [`get_config`]          | Read the resolved configuration for the settings panel |
+//! | [`save_config_profile`] | Persist a profile into `~/.harnesscode/config.toml` |
 //!
 //! All commands are `async` and return serialisable JSON values so that the
 //! frontend can render the appropriate Generative UI card.
@@ -16,7 +17,6 @@
 use harnesscode_core::{
     config::{default_provider, load_config, user_config_path, HarnessConfig, ProfileConfig},
     multi_agent::{AgentOutput, Controller},
-    risk_management::{RiskAssessment, RiskError, RiskManager},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -33,15 +33,10 @@ use tracing::{error, info};
 #[serde(tag = "card_type", rename_all = "snake_case")]
 pub enum AgentTaskResponse {
     /// Pipeline completed successfully — show a Code Diff Card.
+    /// Risk assessment is embedded in `outputs` as an `AgentRole::Risk` entry.
     CodeDiff {
         outputs: Vec<AgentOutput>,
         summary: String,
-    },
-    /// A high-risk file was detected — show a Risk Alert Card.
-    RiskAlert {
-        filepath: String,
-        reason: String,
-        blocked: bool,
     },
     /// An unexpected error occurred.
     Error { message: String },
@@ -182,35 +177,6 @@ pub async fn invoke_agent_task(prompt: String) -> AgentTaskResponse {
     }
 }
 
-/// Assess the risk of modifying `filepath`.
-///
-/// Returns a [`RiskAssessment`] on success, or a [`AgentTaskResponse::RiskAlert`]
-/// if the file is classified as high risk.
-#[command]
-pub async fn check_file_risk(filepath: String) -> AgentTaskResponse {
-    info!(filepath = %filepath, "check_file_risk called from frontend");
-
-    let rm = RiskManager::new();
-    match rm.check_file_risk(&filepath) {
-        Ok(assessment) => {
-            // Represent a non-blocking assessment as a CodeDiff response
-            // so the frontend knows it can proceed.
-            AgentTaskResponse::RiskAlert {
-                filepath: assessment.filepath,
-                reason: assessment.reason,
-                blocked: false,
-            }
-        }
-        Err(RiskError::HighRiskBlocked { filepath, reason }) => {
-            AgentTaskResponse::RiskAlert {
-                filepath,
-                reason,
-                blocked: true,
-            }
-        }
-    }
-}
-
 // ──────────────────────────────────────────────
 // App builder — called by main.rs
 // ──────────────────────────────────────────────
@@ -233,7 +199,6 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             invoke_agent_task,
-            check_file_risk,
             get_config,
             save_config_profile,
         ])

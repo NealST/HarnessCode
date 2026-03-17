@@ -7,7 +7,8 @@
 //! * [`AgentOutput`] — the result produced by a single agent execution.
 //! * [`Controller`] — cybernetic feedback loop that drives the pipeline to convergence.
 
-use crate::llm::{LlmMessage, LlmProvider};
+use crate::llm::{LlmCompletion, LlmMessage, LlmProvider};
+use crate::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -47,6 +48,8 @@ pub enum AgentRole {
     Planner,
     /// Writes and applies code changes inside the sandbox.
     Coder,
+    /// Analyses the code diff for semantic risk and tags it for CR awareness.
+    Risk,
     /// Validates the output, runs tests, and decides pass/fail.
     Reviewer,
 }
@@ -56,6 +59,7 @@ impl fmt::Display for AgentRole {
         match self {
             AgentRole::Planner => write!(f, "Planner"),
             AgentRole::Coder => write!(f, "Coder"),
+            AgentRole::Risk => write!(f, "Risk"),
             AgentRole::Reviewer => write!(f, "Reviewer"),
         }
     }
@@ -193,9 +197,16 @@ impl Agent for LlmPlannerAgent {
 
 const CODER_SYSTEM: &str = "\
 You are an expert software engineer working on a real codebase via HarnessCode.
-Given an execution plan, generate the exact code changes required.
+You have access to tools to read and modify files. Use them to implement the task.
 
-Respond ONLY with a valid JSON object in this exact format:
+## Workflow
+1. Use read_file / list_directory / search_files to understand the current code.
+2. Use write_file or apply_diff to apply your changes.
+3. Use run_command to verify (e.g. `cargo build`, `cargo test`).
+4. Once all changes are applied and verified, respond with a JSON summary.
+
+## Final response format
+When you are done making changes, respond ONLY with a valid JSON object:
 {
   \"diff\": \"--- a/src/main.rs\\n+++ b/src/main.rs\\n@@ -1 +1 @@\\n-// TODO\\n+// Done\",
   \"files_changed\": 1,
@@ -204,16 +215,17 @@ Respond ONLY with a valid JSON object in this exact format:
 }
 
 Fields:
-- diff: unified diff of ALL changes (--- a/path / +++ b/path format)
-- files_changed: number of files modified
+- diff: unified diff summarising ALL changes you made (--- a/path / +++ b/path)
+- files_changed: number of files you modified or created
 - explanation: concise description of what changed and why
 - language: primary programming language used
 
-Generate real, correct, working code. Do not include any text outside the JSON object.";
+Do not include any text outside the JSON object in your final response.";
 
 /// Coder agent backed by an LLM. Generates code diffs from the Planner's output.
 pub struct LlmCoderAgent {
     pub llm: Arc<dyn LlmProvider>,
+    pub registry: Arc<ToolRegistry>,
 }
 
 #[async_trait::async_trait]
@@ -230,8 +242,8 @@ impl Agent for LlmCoderAgent {
             LlmMessage::user(format!("Execution plan:\n{context}")),
         ];
 
-        let response = self.llm.complete(&messages).await?;
-        let payload = parse_json_or_wrap(&response.content);
+        let text = run_tool_loop(&self.llm, messages, &self.registry).await?;
+        let payload = parse_json_or_wrap(&text);
 
         let summary = payload
             .get("explanation")
@@ -243,6 +255,82 @@ impl Agent for LlmCoderAgent {
             role: AgentRole::Coder,
             summary,
             payload,
+            success: true,
+        })
+    }
+}
+
+// ── Risk ─────────────────────────────────────────
+
+const RISK_SYSTEM: &str = "\
+You are a senior software architect and security engineer at HarnessCode. \
+Analyse the provided code diff to assess its risk level for a production system. \
+Focus on semantic impact — what the change actually does — not just file names.
+
+Respond ONLY with a valid JSON object in this exact format:
+{
+  \"risk_level\": \"low\",
+  \"reason\": \"brief explanation of why this risk level was assigned\",
+  \"affected_areas\": [\"authentication\"],
+  \"breaking_change\": false,
+  \"security_implications\": \"\",
+  \"cr_focus\": \"what reviewers should pay most attention to\"
+}
+
+Fields:
+- risk_level: \"low\" | \"medium\" | \"high\"
+- reason: concise explanation (1-2 sentences)
+- affected_areas: list of system areas affected (empty array if none)
+- breaking_change: true if this could break existing behaviour or API contracts
+- security_implications: description of security impact, or empty string if none
+- cr_focus: specific guidance for reviewers on what to examine carefully
+
+Use \"high\" if the change modifies authentication/authorisation logic, cryptographic operations, \
+database schemas, external API contracts, or introduces injection/data-leakage vectors.
+Use \"medium\" if the change modifies configuration loading, environment handling, logging, \
+error handling, dependency versions, or CI/CD pipeline code.
+Use \"low\" for all other changes.
+Do not include any text outside the JSON object.";
+
+/// Risk agent backed by an LLM. Analyses the Coder's diff for semantic risk.
+pub struct LlmRiskAgent {
+    pub llm: Arc<dyn LlmProvider>,
+}
+
+#[async_trait::async_trait]
+impl Agent for LlmRiskAgent {
+    fn role(&self) -> AgentRole {
+        AgentRole::Risk
+    }
+
+    async fn execute(&self, context: &str) -> Result<AgentOutput, AgentError> {
+        info!(role = %AgentRole::Risk, "Analysing code changes for semantic risk");
+
+        let messages = vec![
+            LlmMessage::system(RISK_SYSTEM),
+            LlmMessage::user(format!("Code changes to assess:\n{context}")),
+        ];
+
+        let response = self.llm.complete(&messages).await?;
+        let payload = parse_json_or_wrap(&response.content);
+
+        let risk_level = payload
+            .get("risk_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("low");
+
+        let reason = payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("no significant risk detected");
+
+        let summary = format!("[{}] {}", risk_level.to_uppercase(), reason);
+
+        Ok(AgentOutput {
+            role: AgentRole::Risk,
+            summary,
+            payload,
+            // Risk assessment is always informational — it never blocks the pipeline.
             success: true,
         })
     }
@@ -317,6 +405,58 @@ impl Agent for LlmReviewerAgent {
 }
 
 // ──────────────────────────────────────────────
+// Tool loop — agentic ReAct cycle
+// ──────────────────────────────────────────────
+
+/// Agentic tool loop (module-level free function).
+///
+/// Repeatedly calls the LLM with the current message history and executes any
+/// tools it requests, until the model produces a final text answer.
+///
+/// This is the core of the *Harness Engineering* model: the LLM reasons and
+/// selects tools; the registry executes them with guaranteed fidelity.
+async fn run_tool_loop(
+    llm: &Arc<dyn LlmProvider>,
+    mut messages: Vec<LlmMessage>,
+    registry: &ToolRegistry,
+) -> Result<String, AgentError> {
+    const MAX_TOOL_TURNS: usize = 20;
+    let mut turns = 0;
+
+    loop {
+        turns += 1;
+        if turns > MAX_TOOL_TURNS {
+            return Err(AgentError::ExecutionFailed {
+                role: AgentRole::Planner, // placeholder — loop is agent-agnostic
+                message: format!("Tool loop exceeded {} turns without finishing", MAX_TOOL_TURNS),
+            });
+        }
+
+        match llm.complete_with_tools(&messages, &registry.defs()).await? {
+            LlmCompletion::Done { text, .. } => return Ok(text),
+            LlmCompletion::NeedTools { calls, .. } => {
+                // Record the assistant's tool-call turn.
+                messages.push(LlmMessage::assistant_tool_calls(calls.clone()));
+
+                // Execute all requested tools concurrently.
+                let results = futures::future::join_all(
+                    calls.iter().map(|c| registry.dispatch(c))
+                ).await;
+
+                // Feed each result back as a tool-result message.
+                for (call, result) in calls.iter().zip(results.iter()) {
+                    messages.push(LlmMessage::tool_result(
+                        &call.id,
+                        &result.content,
+                        result.is_error,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+// ──────────────────────────────────────────────
 // Controller — cybernetic feedback loop
 // ──────────────────────────────────────────────
 
@@ -324,7 +464,7 @@ impl Agent for LlmReviewerAgent {
 ///
 /// Implements a **TOTE** (Test-Operate-Test-Exit) loop:
 /// 1. **Test** — Planner evaluates the current state vs. the desired goal.
-/// 2. **Operate** — Coder applies changes.
+/// 2. **Operate** — Coder applies changes (with tool calls if needed).
 /// 3. **Test** — Reviewer checks the result against success criteria.
 /// 4. **Exit** — Loop terminates on success or after `max_retries` failures.
 pub struct Controller {
@@ -332,12 +472,28 @@ pub struct Controller {
     pub max_retries: usize,
     /// The LLM backend shared by all agents in the pipeline.
     pub llm: Arc<dyn LlmProvider>,
+    /// The tool registry available to agents during tool-use turns.
+    pub registry: Arc<ToolRegistry>,
 }
 
 impl Controller {
     /// Create a new [`Controller`] with the given retry limit and LLM provider.
+    /// Loads all builtin tools automatically.
     pub fn new(max_retries: usize, llm: Arc<dyn LlmProvider>) -> Self {
-        Self { max_retries, llm }
+        Self {
+            max_retries,
+            llm,
+            registry: Arc::new(ToolRegistry::with_builtins()),
+        }
+    }
+
+    /// Create a [`Controller`] with a custom [`ToolRegistry`].
+    pub fn new_with_tools(
+        max_retries: usize,
+        llm: Arc<dyn LlmProvider>,
+        registry: Arc<ToolRegistry>,
+    ) -> Self {
+        Self { max_retries, llm, registry }
     }
 
     /// Run the full Planner → Coder → Reviewer pipeline for the given `prompt`.
@@ -360,7 +516,8 @@ impl Controller {
         tx: Option<mpsc::Sender<PipelineEvent>>,
     ) -> Result<Vec<AgentOutput>, AgentError> {
         let planner = LlmPlannerAgent { llm: Arc::clone(&self.llm) };
-        let coder = LlmCoderAgent { llm: Arc::clone(&self.llm) };
+        let coder = LlmCoderAgent { llm: Arc::clone(&self.llm), registry: Arc::clone(&self.registry) };
+        let risk_agent = LlmRiskAgent { llm: Arc::clone(&self.llm) };
         let reviewer = LlmReviewerAgent { llm: Arc::clone(&self.llm) };
 
         // Helper: fire an event, ignoring a closed receiver.
@@ -409,9 +566,23 @@ impl Controller {
             }
             send!(PipelineEvent::StageCompleted { output: code_output.clone() });
 
-            // ── Stage 3: Review ──────────────────────────────────────────────
+            // ── Stage 3: Risk Assessment ─────────────────────────────────────
+            send!(PipelineEvent::StageStarted { role: AgentRole::Risk });
+            let risk_context = serde_json::to_string(&code_output.payload)?;
+            let risk_output = risk_agent.execute(&risk_context).await.map_err(|e| {
+                AgentError::ExecutionFailed { role: AgentRole::Risk, message: e.to_string() }
+            })?;
+            // Risk is always informational — it never causes a pipeline retry.
+            send!(PipelineEvent::StageCompleted { output: risk_output.clone() });
+
+            // ── Stage 4: Review (informed by risk assessment) ────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Reviewer });
-            let context_for_reviewer = serde_json::to_string(&code_output.payload)?;
+            // Pass both code changes and risk assessment so the Reviewer has full context.
+            let combined_review_context = serde_json::json!({
+                "code_changes": code_output.payload,
+                "risk_assessment": risk_output.payload,
+            });
+            let context_for_reviewer = serde_json::to_string(&combined_review_context)?;
             let review = reviewer.execute(&context_for_reviewer).await.map_err(|e| {
                 AgentError::ExecutionFailed { role: AgentRole::Reviewer, message: e.to_string() }
             })?;
@@ -427,7 +598,7 @@ impl Controller {
 
             // ── All stages passed ────────────────────────────────────────────
             info!(attempt, "Pipeline converged successfully");
-            return Ok(vec![plan, code_output, review]);
+            return Ok(vec![plan, code_output, risk_output, review]);
         }
     }
 }
@@ -465,7 +636,9 @@ mod tests {
 
             let content = if sys.contains("planning agent") {
                 r#"{"steps":["Analyse codebase","Generate diff","Run tests"],"affected_files":["src/main.rs"],"success_criteria":"tests pass","complexity":"low"}"#
-            } else if sys.contains("software engineer") {
+            } else if sys.contains("architect and security engineer") {
+                r#"{"risk_level":"low","reason":"no significant risk detected","affected_areas":[],"breaking_change":false,"security_implications":"","cr_focus":"standard code review"}"#
+            } else if sys.contains("expert software engineer") {
                 r#"{"diff":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-// TODO\n+// Done","files_changed":1,"explanation":"Replaced placeholder","language":"rust"}"#
             } else {
                 r#"{"approved":true,"issues":[],"security_concerns":[],"recommendation":"LGTM"}"#
@@ -474,6 +647,8 @@ mod tests {
             Ok(LlmResponse {
                 content: content.to_string(),
                 model: "mock-model".to_string(),
+                prompt_tokens: None,
+                completion_tokens: None,
                 total_tokens: Some(100),
             })
         }
@@ -484,6 +659,15 @@ mod tests {
                 finished: true,
             })])))
         }
+
+        async fn complete_with_tools(
+            &self,
+            messages: &[LlmMessage],
+            _tools: &[crate::llm::ToolDef],
+        ) -> Result<crate::llm::LlmCompletion, LlmError> {
+            let resp = self.complete(messages).await?;
+            Ok(crate::llm::LlmCompletion::Done { text: resp.content, prompt_tokens: None, completion_tokens: None })
+        }
     }
 
     #[tokio::test]
@@ -493,7 +677,7 @@ mod tests {
             .run("add a hello world function")
             .await
             .unwrap();
-        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs.len(), 4);
         assert!(outputs.iter().all(|o| o.success));
     }
 
@@ -501,7 +685,8 @@ mod tests {
     async fn test_agent_roles() {
         let llm: Arc<dyn LlmProvider> = Arc::new(MockLlmProvider);
         assert_eq!(LlmPlannerAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Planner);
-        assert_eq!(LlmCoderAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Coder);
+        assert_eq!(LlmCoderAgent { llm: Arc::clone(&llm), registry: Arc::new(crate::tools::ToolRegistry::empty()) }.role(), AgentRole::Coder);
+        assert_eq!(LlmRiskAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Risk);
         assert_eq!(LlmReviewerAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Reviewer);
     }
 }

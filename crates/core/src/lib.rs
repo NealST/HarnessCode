@@ -7,12 +7,17 @@
 //!
 //! | Module | Responsibility |
 //! |--------|---------------|
-//! | [`multi_agent`] | Agent traits and the cybernetic [`Controller`](multi_agent::Controller) |
-//! | [`risk_management`] | [`RiskManager`](risk_management::RiskManager) that scores file changes |
+//! | [`agents`] | Agent trait, concrete agent implementations (Planner, Coder, Risk, Reviewer) |
+//! | [`controller`] | Cybernetic [`Controller`](controller::Controller), guardrails, pipeline events |
+//! | [`observability`] | Span types, [`SpanSink`](observability::SpanSink) trait, [`TerminalSink`](observability::TerminalSink), [`JsonLinesSink`](observability::JsonLinesSink) |
 //! | [`context`] | Helpers for generating and parsing `agents.md` / `Claude.md` context files |
+//! | [`llm`] | LLM provider trait and vendor adapters |
+//! | [`tools`] | Tool registry and builtin tool implementations |
 
+pub mod agents;
 pub mod config;
 pub mod context;
+pub mod controller;
 pub mod llm;
-pub mod multi_agent;
-pub mod risk_management;
+pub mod observability;
+pub mod tools;

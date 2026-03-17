@@ -17,7 +17,6 @@ use harnesscode_core::{
         HarnessConfig, ProfileConfig, PROJECT_CONFIG_FILE,
     },
     multi_agent::{AgentRole, Controller, PipelineEvent},
-    risk_management::{RiskError, RiskManager},
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::{Confirm, Select, Text};
@@ -43,10 +42,6 @@ struct Cli {
     /// Override the active config profile (e.g. --profile ollama)
     #[arg(long, short = 'p', env = "HARNESSCODE_PROFILE")]
     profile: Option<String>,
-
-    /// File to check for risk before starting the pipeline (optional demo flag)
-    #[arg(long, short = 'f')]
-    file: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -314,7 +309,11 @@ fn print_pipeline_result(outputs: &[harnesscode_core::multi_agent::AgentOutput])
     println!("🎉  Pipeline completed successfully!\n");
 
     for output in outputs {
-        let icon = if output.success { "✅" } else { "❌" };
+        let icon = if output.role == harnesscode_core::multi_agent::AgentRole::Risk {
+            if output.summary.starts_with("[HIGH]") { "🚨" }
+            else if output.summary.starts_with("[MEDIUM]") { "⚠️" }
+            else { "✅" }
+        } else if output.success { "✅" } else { "❌" };
         println!("  {icon}  [{:<8}]  {}", output.role.to_string(), output.summary);
 
         // ── Planner: show numbered steps if present ──────────────────────────
@@ -346,6 +345,37 @@ fn print_pipeline_result(outputs: &[harnesscode_core::multi_agent::AgentOutput])
                     }
                 }
                 println!();
+            }
+        }
+
+        // ── Risk: show semantic assessment ──────────────────────────────────
+        if output.role == harnesscode_core::multi_agent::AgentRole::Risk {
+            let risk_level = output.payload
+                .get("risk_level").and_then(|v| v.as_str()).unwrap_or("low");
+            let (risk_colour, risk_icon) = match risk_level {
+                "high"   => ("\x1b[31m", "🚨"),
+                "medium" => ("\x1b[33m", "⚠️ "),
+                _        => ("\x1b[32m", "✅"),
+            };
+            println!("        {risk_icon}  Level: {risk_colour}{}\x1b[0m", risk_level.to_uppercase());
+            if let Some(areas) = output.payload.get("affected_areas").and_then(|a| a.as_array()) {
+                if !areas.is_empty() {
+                    let list: Vec<_> = areas.iter().filter_map(|a| a.as_str()).collect();
+                    println!("        Affected areas: {}", list.join(" · "));
+                }
+            }
+            if output.payload.get("breaking_change").and_then(|b| b.as_bool()).unwrap_or(false) {
+                println!("        \x1b[31m⚡ Breaking change detected\x1b[0m");
+            }
+            if let Some(sec) = output.payload.get("security_implications").and_then(|s| s.as_str()) {
+                if !sec.is_empty() {
+                    println!("        🔒 Security: {sec}");
+                }
+            }
+            if let Some(focus) = output.payload.get("cr_focus").and_then(|f| f.as_str()) {
+                if !focus.is_empty() {
+                    println!("        👁  CR Focus: {focus}");
+                }
             }
         }
 
@@ -396,28 +426,6 @@ async fn main() {
     // ── Interactive agent session ────────────────────────────────────────────
     print_banner();
 
-    let risk_manager = RiskManager::new();
-
-    if let Some(ref filepath) = cli.file {
-        if let Err(RiskError::HighRiskBlocked { ref filepath, ref reason }) =
-            risk_manager.check_file_risk(filepath)
-        {
-            let confirmed = Confirm::new(&format!(
-                "⚠️  HIGH RISK: Modifying '{}' — {}. Do you want to proceed?",
-                filepath, reason
-            ))
-            .with_default(false)
-            .prompt()
-            .unwrap_or(false);
-
-            if !confirmed {
-                println!("🛑  Operation cancelled by user. Exiting safely.");
-                return;
-            }
-            println!("✅  User confirmed. Proceeding with caution…\n");
-        }
-    }
-
     let task = match Text::new("💬  What do you want to build or fix today?")
         .with_placeholder("e.g. Add a login endpoint to the API")
         .prompt()
@@ -460,6 +468,7 @@ async fn main() {
         match role {
             AgentRole::Planner  => ("🧠", "Planner "),
             AgentRole::Coder    => ("💻", "Coder   "),
+            AgentRole::Risk     => ("🛡️", "Risk    "),
             AgentRole::Reviewer => ("🔍", "Reviewer"),
         }
     }
@@ -480,10 +489,24 @@ async fn main() {
             PipelineEvent::StageCompleted { output } => {
                 if let Some(pb) = current_pb.take() {
                     let (icon, label) = stage_label(output.role);
-                    pb.finish_with_message(format!(
-                        "✅  {icon}  {label}   {}",
-                        output.summary
-                    ));
+                    if output.role == AgentRole::Risk {
+                        let (prefix, colour) = if output.summary.starts_with("[HIGH]") {
+                            ("🚨", "\x1b[31m")
+                        } else if output.summary.starts_with("[MEDIUM]") {
+                            ("⚠️ ", "\x1b[33m")
+                        } else {
+                            ("✅", "\x1b[32m")
+                        };
+                        pb.finish_with_message(format!(
+                            "{prefix}  {icon}  {label}   {colour}{}\x1b[0m",
+                            output.summary
+                        ));
+                    } else {
+                        pb.finish_with_message(format!(
+                            "✅  {icon}  {label}   {}",
+                            output.summary
+                        ));
+                    }
                 }
             }
             PipelineEvent::PipelineFailed { error } => {

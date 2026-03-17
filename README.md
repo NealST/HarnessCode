@@ -25,6 +25,72 @@ power of modern large language models, giving teams a coding agent that is:
 
 ## Architecture
 
+### 架构分层图
+
+```mermaid
+graph TB
+    subgraph UI["🖥️ UI 交互层 (Interaction Layer)"]
+        CLI["CLI / TUI<br/>indicatif · inquire · crossterm"]
+        TAURI["Tauri v2 Desktop<br/>React · TypeScript · TailwindCSS"]
+    end
+
+    subgraph ORCH["🎛️ Agent 调度 & 上下文管理层 (Orchestration Layer)"]
+        CTRL["Controller<br/>TOTE 控制循环 / 自动重试"]
+        RISK["Risk Manager<br/>文件安全评分 (Low · Medium · High)"]
+        CTX["Context Manager<br/>project.md · agents.md"]
+        CFG["Config System<br/>layered TOML · multi-profile"]
+    end
+
+    subgraph AGENTS["🤖 子 Agent 层 (Sub-Agent Layer)"]
+        PLAN["🧠 Planner Agent<br/>任务拆解 & 步骤规划"]
+        CODE["💻 Coder Agent<br/>代码生成 & 变更应用"]
+        REV["🔍 Reviewer Agent<br/>质量审查 & 通过判定"]
+    end
+
+    subgraph TOOLS["🛠️ 工具层 (MCP & Skills)"]
+        MCP["MCP Servers<br/>Filesystem · Git · Shell · Browser"]
+        SKILLS["Custom Skills<br/>代码分析 · 测试运行 · 安全扫描"]
+    end
+
+    subgraph MODELS["🧠 模型层 (Model Layer)"]
+        OAI["OpenAI-Compatible<br/>GPT-4o · DeepSeek · Ollama · Groq · Azure"]
+        ANT["Anthropic<br/>Claude 3.5 Sonnet · Claude 3 Opus"]
+    end
+
+    CLI -->|user task| CTRL
+    TAURI -->|user task| CTRL
+    CFG -.->|profile resolution| CTRL
+    CTRL <-->|risk check| RISK
+    CTRL <-->|context r/w| CTX
+    CTRL -->|plan| PLAN
+    CTRL -->|code| CODE
+    CTRL -->|review| REV
+
+    PLAN --> MCP
+    CODE --> MCP
+    REV --> MCP
+    PLAN --> SKILLS
+    CODE --> SKILLS
+    REV --> SKILLS
+
+    PLAN -->|LLM call| OAI
+    PLAN -->|LLM call| ANT
+    CODE -->|LLM call| OAI
+    CODE -->|LLM call| ANT
+    REV -->|LLM call| OAI
+    REV -->|LLM call| ANT
+
+    style UI    fill:#1a3a5c,stroke:#4a90d9,color:#e0e8f0
+    style ORCH  fill:#1e3d1a,stroke:#5aad3c,color:#e0f0e0
+    style AGENTS fill:#3d1a3d,stroke:#c050c0,color:#f0e0f0
+    style TOOLS fill:#3d3d1a,stroke:#d0b030,color:#f0f0e0
+    style MODELS fill:#3d1a1a,stroke:#d04040,color:#f0e0e0
+```
+
+---
+
+### Codebase Overview
+
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                      HarnessCode                         │
