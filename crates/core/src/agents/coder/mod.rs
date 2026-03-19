@@ -3,6 +3,7 @@
 pub mod context;
 
 use super::{parse_json_or_wrap, Agent, AgentError, AgentOutput, AgentRole};
+use super::drift_judge::DriftParams;
 use crate::controller::{guardrails::ExecutionGuard, tool_loop::run_tool_loop};
 use crate::llm::{LlmMessage, LlmProvider};
 use crate::observability::ObsCtx;
@@ -24,6 +25,8 @@ pub struct LlmCoderAgent {
     pub registry: Arc<ToolRegistry>,
     pub guard: Arc<ExecutionGuard>,
     pub obs: ObsCtx,
+    /// Optional drift-detection configuration.  `None` disables drift checking.
+    pub drift: Option<DriftParams>,
 }
 
 #[async_trait::async_trait]
@@ -41,7 +44,7 @@ impl Agent for LlmCoderAgent {
         ];
 
         let (text, tokens) =
-            run_tool_loop(&self.llm, messages, &self.registry, &self.guard, &self.obs).await?;
+            run_tool_loop(&self.llm, messages, &self.registry, &self.guard, &self.obs, self.drift.as_ref()).await?;
         let payload = parse_json_or_wrap(&text);
 
         let summary = payload

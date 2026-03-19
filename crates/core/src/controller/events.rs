@@ -11,10 +11,33 @@ use serde::{Deserialize, Serialize};
 pub enum PipelineEvent {
     /// An agent stage has started — show a "thinking" indicator.
     StageStarted { role: AgentRole },
+    /// The Planner produced an execution plan.
+    ///
+    /// Emitted immediately after [`StageCompleted`] for the Planner so that
+    /// consumers (CLI, desktop UI) can display the upcoming action steps as a
+    /// todo list before the Coder starts executing.
+    PlanReady {
+        steps: Vec<String>,
+        affected_files: Vec<String>,
+        complexity: String,
+    },
     /// An agent stage completed successfully.
     StageCompleted { output: AgentOutput },
     /// The pipeline failed (agent error, guardrail, or max retries exceeded).
     PipelineFailed { error: String },
+    /// A network or API error occurred during an LLM request.
+    ///
+    /// Informational — the controller may retry the stage.  Consumers should
+    /// show a warning so users know why a stage is slow or failing.
+    NetworkError {
+        /// Error classification: `"request_timeout"`, `"connection_error"`,
+        /// `"network_error"`, `"rate_limited"`, `"server_error"`, `"api_error"`.
+        category: String,
+        /// Human-readable message for the user.
+        message: String,
+        /// Which agent stage was running when the error occurred.
+        role: AgentRole,
+    },
 }
 
 /// Categorises why a pipeline run terminated before completion.

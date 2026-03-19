@@ -131,6 +131,22 @@ fn print_summary(spans: &[Span]) {
             .filter(|s| s.parent_id == Some(span.span_id) && matches!(s.kind, SpanKind::ToolTurn { .. }))
             .collect();
 
+        // LLM request errors (children of this stage span)
+        let llm_error_spans: Vec<&Span> = spans.iter()
+            .filter(|s| s.parent_id == Some(span.span_id) && matches!(s.kind, SpanKind::LlmRequest { .. }))
+            .collect();
+        for llm_span in &llm_error_spans {
+            let category = match &llm_span.kind {
+                SpanKind::LlmRequest { category, .. } => category.as_str(),
+                _ => "unknown",
+            };
+            let msg = match &llm_span.status {
+                SpanStatus::Error { message } => message.as_str(),
+                _ => "",
+            };
+            println!("     ⚠  LLM [{category}]  {msg}");
+        }
+
         for (ti, turn) in turn_spans.iter().enumerate() {
             let turn_num = match &turn.kind { SpanKind::ToolTurn { turn } => *turn, _ => 0 };
             let is_last_turn = ti == turn_spans.len() - 1;

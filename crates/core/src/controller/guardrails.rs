@@ -7,16 +7,11 @@
 //!
 //! | Check | Trigger | Default |
 //! |-------|---------|---------|
-//! | Step budget | More than `max_tool_turns` tool-use rounds | 20 turns |
-//! | Timeout | Wall-clock elapsed > `pipeline_timeout` | 300 s |
-//! | Concurrent tool ceiling | Single `NeedTools` batch > `max_concurrent_tools` | 8 |
-//! | Per-tool rate limit | One tool called more than `per_tool_limit[name]` times | 10× run_command |
+//! | Step budget | More than `max_tool_turns` tool-use rounds | 100 turns |
+//! | Budget warning | 80 % of `max_tool_turns` reached — inject hint | always on |
 //! | Duplicate deduplication | Identical (name + canonical args) calls in one batch | always on |
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::llm::ToolCall;
@@ -30,12 +25,16 @@ use crate::llm::ToolCall;
 pub enum GuardrailViolation {
     #[error("step budget exceeded: tool loop ran {used} turns, limit is {limit}")]
     StepBudgetExceeded { used: usize, limit: usize },
+}
 
-    #[error("pipeline timeout: elapsed {elapsed:?}, deadline was {limit:?}")]
-    Timeout { elapsed: Duration, limit: Duration },
-
-    #[error("tool rate limit exceeded: '{tool}' called {used} times, limit is {limit}")]
-    ToolRateLimitExceeded { tool: String, used: usize, limit: usize },
+/// Result of a successful `increment_turns` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepStatus {
+    /// Budget is healthy — no action required.
+    Ok,
+    /// The 80 % threshold was just crossed.  The caller should inject a
+    /// system-level hint so the LLM starts wrapping up.
+    Warning { used: usize, remaining: usize },
 }
 
 // ──────────────────────────────────────────────
@@ -44,80 +43,53 @@ pub enum GuardrailViolation {
 
 /// Stateful execution guard passed into every tool loop invocation.
 ///
-/// Create one guard per Coder execution (not shared across pipeline retries so
-/// that each attempt gets a fresh budget).
+/// Create one guard per agent execution (not shared across pipeline retries so
+/// that each attempt gets a fresh step budget).
 pub struct ExecutionGuard {
     // ── configuration ─────────────────────────────────────────────────────
     /// Maximum number of tool-use rounds before forcing termination.
     pub max_tool_turns: usize,
-    /// Hard wall-clock limit for the entire tool loop.
-    pub pipeline_timeout: Option<Duration>,
-    /// Maximum tools that may be dispatched in a single `NeedTools` batch.
-    pub max_concurrent_tools: usize,
-    /// Per-tool-name invocation ceiling for the entire guard lifetime.
-    /// Tools not listed here have no per-tool limit.
-    pub per_tool_limit: HashMap<&'static str, usize>,
 
     // ── runtime state ─────────────────────────────────────────────────────
     tool_turns_used: AtomicUsize,
-    tool_call_counts: Mutex<HashMap<String, usize>>,
-    started_at: Instant,
 }
 
 impl Default for ExecutionGuard {
     fn default() -> Self {
-        let mut per_tool_limit = HashMap::new();
-        // Actuator tools get tighter rate limits than sensors by default.
-        per_tool_limit.insert("run_command", 10);
-        per_tool_limit.insert("write_file", 50);
-        per_tool_limit.insert("apply_diff", 50);
-
         Self {
-            max_tool_turns: 20,
-            pipeline_timeout: Some(Duration::from_secs(300)),
-            max_concurrent_tools: 8,
-            per_tool_limit,
+            max_tool_turns: 100,
             tool_turns_used: AtomicUsize::new(0),
-            tool_call_counts: Mutex::new(HashMap::new()),
-            started_at: Instant::now(),
         }
     }
 }
 
 impl ExecutionGuard {
-    /// Create a guard with custom settings.
-    pub fn new(
-        max_tool_turns: usize,
-        pipeline_timeout: Option<Duration>,
-        max_concurrent_tools: usize,
-        per_tool_limit: HashMap<&'static str, usize>,
-    ) -> Self {
+    /// Create a guard with the given step budget.
+    pub fn new(max_tool_turns: usize) -> Self {
         Self {
             max_tool_turns,
-            pipeline_timeout,
-            max_concurrent_tools,
-            per_tool_limit,
             tool_turns_used: AtomicUsize::new(0),
-            tool_call_counts: Mutex::new(HashMap::new()),
-            started_at: Instant::now(),
+        }
+    }
+
+    /// Create a guard with no step budget (unlimited turns).
+    ///
+    /// Used for the Planner agent, which only has read-only sensor tools.
+    pub fn unlimited() -> Self {
+        Self {
+            max_tool_turns: usize::MAX,
+            tool_turns_used: AtomicUsize::new(0),
         }
     }
 
     // ── Check methods ──────────────────────────────────────────────────────
 
-    /// Check the wall-clock timeout.  Call at the top of every tool loop iteration.
-    pub fn check_timeout(&self) -> Result<(), GuardrailViolation> {
-        if let Some(limit) = self.pipeline_timeout {
-            let elapsed = self.started_at.elapsed();
-            if elapsed > limit {
-                return Err(GuardrailViolation::Timeout { elapsed, limit });
-            }
-        }
-        Ok(())
-    }
-
     /// Increment the turn counter and check the step-budget limit.
-    pub fn increment_turns(&self) -> Result<(), GuardrailViolation> {
+    ///
+    /// Returns [`StepStatus::Warning`] exactly once — the first turn that
+    /// crosses 80 % of `max_tool_turns` — so the caller can inject a
+    /// system-level "wrap up" hint into the conversation.
+    pub fn increment_turns(&self) -> Result<StepStatus, GuardrailViolation> {
         let used = self.tool_turns_used.fetch_add(1, Ordering::Relaxed) + 1;
         if used > self.max_tool_turns {
             return Err(GuardrailViolation::StepBudgetExceeded {
@@ -125,21 +97,33 @@ impl ExecutionGuard {
                 limit: self.max_tool_turns,
             });
         }
-        Ok(())
+        // Fire the warning exactly once when the 80 % line is crossed.
+        let threshold = self.warning_threshold();
+        if used == threshold {
+            Ok(StepStatus::Warning {
+                used,
+                remaining: self.max_tool_turns - used,
+            })
+        } else {
+            Ok(StepStatus::Ok)
+        }
     }
 
-    /// Deduplicate and clamp a batch of tool calls.
+    /// The turn number at which the 80 % warning fires.
+    fn warning_threshold(&self) -> usize {
+        // For unlimited guards (usize::MAX) this will never match.
+        (self.max_tool_turns as f64 * 0.8).ceil() as usize
+    }
+
+    /// Deduplicate a batch of tool calls.
     ///
-    /// Steps performed in order:
-    /// 1. Remove calls whose (name, canonical-args) pair already appeared in
-    ///    this batch (LLM hallucination deduplication).
-    /// 2. Truncate to `max_concurrent_tools` (tool-explosion prevention).
+    /// Removes calls whose (name, canonical-args) pair already appeared in
+    /// the same batch (LLM hallucination deduplication).
     ///
-    /// Returns the cleaned batch.  Never errors — clamping is silent.
+    /// Returns the cleaned batch.  Never errors — dedup is silent.
     pub fn sanitise_calls(&self, calls: Vec<ToolCall>) -> Vec<ToolCall> {
-        // Step 1 — deduplicate within this batch.
         let mut seen: Vec<String> = Vec::new();
-        let deduped: Vec<ToolCall> = calls
+        calls
             .into_iter()
             .filter(|c| {
                 let key = dedup_key(&c.name, &c.arguments);
@@ -150,42 +134,7 @@ impl ExecutionGuard {
                     true
                 }
             })
-            .collect();
-
-        // Step 2 — enforce concurrent ceiling.
-        if deduped.len() > self.max_concurrent_tools {
-            deduped.into_iter().take(self.max_concurrent_tools).collect()
-        } else {
-            deduped
-        }
-    }
-
-    /// Check and record a per-tool invocation, enforcing rate limits.
-    ///
-    /// Returns `Err` if the tool has hit its ceiling.  Call after `sanitise_calls`
-    /// so duplicate calls have already been removed.
-    pub fn check_and_record_tool(&self, tool_name: &str) -> Result<(), GuardrailViolation> {
-        let mut counts = self.tool_call_counts.lock().unwrap();
-        let count = counts.entry(tool_name.to_string()).or_insert(0);
-        *count += 1;
-
-        if let Some(&limit) = self.per_tool_limit.get(tool_name) {
-            if *count > limit {
-                return Err(GuardrailViolation::ToolRateLimitExceeded {
-                    tool: tool_name.to_string(),
-                    used: *count,
-                    limit,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    /// Remaining time before the pipeline timeout fires (for retry budget sizing).
-    pub fn remaining_timeout(&self) -> Option<Duration> {
-        self.pipeline_timeout.map(|limit| {
-            limit.saturating_sub(self.started_at.elapsed())
-        })
+            .collect()
     }
 }
 
@@ -266,30 +215,36 @@ mod tests {
 
     #[test]
     fn clamp_enforces_concurrent_ceiling() {
-        let mut guard = ExecutionGuard::default();
-        guard.max_concurrent_tools = 3;
+        let guard = ExecutionGuard::new(20);
         let calls: Vec<ToolCall> = (0..10)
             .map(|i| make_call("read_file", serde_json::json!({"path": format!("file{i}.rs")})))
             .collect();
         let cleaned = guard.sanitise_calls(calls);
-        assert_eq!(cleaned.len(), 3);
+        // No concurrent ceiling — all 10 unique calls pass through.
+        assert_eq!(cleaned.len(), 10);
     }
 
     #[test]
     fn step_budget_exceeded() {
-        let guard = ExecutionGuard::new(2, None, 8, HashMap::new());
+        let guard = ExecutionGuard::new(2);
         guard.increment_turns().unwrap();
         guard.increment_turns().unwrap();
         assert!(guard.increment_turns().is_err());
     }
 
     #[test]
-    fn tool_rate_limit() {
-        let mut limits = HashMap::new();
-        limits.insert("run_command", 2usize);
-        let guard = ExecutionGuard::new(100, None, 8, limits);
-        guard.check_and_record_tool("run_command").unwrap();
-        guard.check_and_record_tool("run_command").unwrap();
-        assert!(guard.check_and_record_tool("run_command").is_err());
+    fn warning_fires_at_80_percent() {
+        let guard = ExecutionGuard::new(10);
+        // Turns 1-7 should be Ok.
+        for _ in 0..7 {
+            assert_eq!(guard.increment_turns().unwrap(), StepStatus::Ok);
+        }
+        // Turn 8 (80 %) should trigger the warning.
+        assert!(matches!(guard.increment_turns().unwrap(), StepStatus::Warning { used: 8, remaining: 2 }));
+        // Turn 9-10 should be Ok (warning only fires once).
+        assert_eq!(guard.increment_turns().unwrap(), StepStatus::Ok);
+        assert_eq!(guard.increment_turns().unwrap(), StepStatus::Ok);
+        // Turn 11 should exceed the budget.
+        assert!(guard.increment_turns().is_err());
     }
 }

@@ -8,15 +8,17 @@
 //! harnesscode [OPTIONS]                   # interactive agent session
 //! harnesscode config init                 # interactive config wizard
 //! harnesscode config show                 # print resolved config
+//! harnesscode context init                # auto-generate AGENTS.md
 //! ```
 
 use clap::{Parser, Subcommand};
 use harnesscode_core::{
+    agents::{AgentOutput, AgentRole},
     config::{
         load_config, project_config_path, user_config_path,
         HarnessConfig, ProfileConfig, PROJECT_CONFIG_FILE,
     },
-    multi_agent::{AgentRole, Controller, PipelineEvent},
+    controller::{Controller, PipelineEvent},
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::{Confirm, Select, Text};
@@ -43,6 +45,10 @@ struct Cli {
     #[arg(long, short = 'p', env = "HARNESSCODE_PROFILE")]
     profile: Option<String>,
 
+    /// Maximum tool-call turns before the agent loop is terminated (default: 100)
+    #[arg(long, env = "HARNESSCODE_MAX_TOOL_TURNS")]
+    max_tool_turns: Option<usize>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -54,6 +60,11 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Generate project context files
+    Context {
+        #[command(subcommand)]
+        action: ContextAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -62,6 +73,12 @@ enum ConfigAction {
     Init,
     /// Print the currently resolved configuration (merged from all layers)
     Show,
+}
+
+#[derive(Subcommand, Debug)]
+enum ContextAction {
+    /// Auto-generate an AGENTS.md file for the current project
+    Init,
 }
 
 // ──────────────────────────────────────────────
@@ -185,6 +202,7 @@ fn cmd_config_init() {
 
     let config = HarnessConfig {
         default_profile: Some(profile_name.clone()),
+        max_tool_turns: None,
         profiles,
     };
 
@@ -264,7 +282,10 @@ fn cmd_config_show() {
         .default_profile
         .as_deref()
         .unwrap_or("<none — will use 'openai'>");
-    println!("  default_profile = \"{default}\"\n");
+    println!("  default_profile  = \"{default}\"");
+
+    let max_turns = config.max_tool_turns.unwrap_or(100);
+    println!("  max_tool_turns   = {max_turns}\n");
 
     if config.profiles.is_empty() {
         println!("  (no profiles configured)\n");
@@ -301,15 +322,41 @@ fn cmd_config_show() {
 }
 
 // ──────────────────────────────────────────────
+// context init command
+// ──────────────────────────────────────────────
+
+fn cmd_context_init() {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let content = harnesscode_core::context::agents_md::generate(&cwd);
+
+    let dest = cwd.join("AGENTS.md");
+    if dest.exists() {
+        let overwrite = Confirm::new("AGENTS.md already exists. Overwrite?")
+            .with_default(false)
+            .prompt()
+            .unwrap_or(false);
+        if !overwrite {
+            println!("Aborted.");
+            return;
+        }
+    }
+
+    match std::fs::write(&dest, &content) {
+        Ok(()) => println!("✅  Generated {}", dest.display()),
+        Err(e) => eprintln!("❌  Failed to write AGENTS.md: {e}"),
+    }
+}
+
+// ──────────────────────────────────────────────
 // Formatted result display
 // ──────────────────────────────────────────────
 
 /// Print a colourised summary of all pipeline outputs.
-fn print_pipeline_result(outputs: &[harnesscode_core::multi_agent::AgentOutput]) {
+fn print_pipeline_result(outputs: &[AgentOutput]) {
     println!("🎉  Pipeline completed successfully!\n");
 
     for output in outputs {
-        let icon = if output.role == harnesscode_core::multi_agent::AgentRole::Risk {
+        let icon = if output.role == AgentRole::Risk {
             if output.summary.starts_with("[HIGH]") { "🚨" }
             else if output.summary.starts_with("[MEDIUM]") { "⚠️" }
             else { "✅" }
@@ -317,7 +364,7 @@ fn print_pipeline_result(outputs: &[harnesscode_core::multi_agent::AgentOutput])
         println!("  {icon}  [{:<8}]  {}", output.role.to_string(), output.summary);
 
         // ── Planner: show numbered steps if present ──────────────────────────
-        if output.role == harnesscode_core::multi_agent::AgentRole::Planner {
+        if output.role == AgentRole::Planner {
             if let Some(steps) = output.payload.get("steps").and_then(|s| s.as_array()) {
                 for (i, step) in steps.iter().enumerate() {
                     let text = step.as_str().unwrap_or_default();
@@ -327,7 +374,7 @@ fn print_pipeline_result(outputs: &[harnesscode_core::multi_agent::AgentOutput])
         }
 
         // ── Coder: colourised diff ────────────────────────────────────────────
-        if output.role == harnesscode_core::multi_agent::AgentRole::Coder {
+        if output.role == AgentRole::Coder {
             if let Some(diff) = output.payload.get("diff").and_then(|d| d.as_str()) {
                 println!();
                 for line in diff.lines() {
@@ -349,7 +396,7 @@ fn print_pipeline_result(outputs: &[harnesscode_core::multi_agent::AgentOutput])
         }
 
         // ── Risk: show semantic assessment ──────────────────────────────────
-        if output.role == harnesscode_core::multi_agent::AgentRole::Risk {
+        if output.role == AgentRole::Risk {
             let risk_level = output.payload
                 .get("risk_level").and_then(|v| v.as_str()).unwrap_or("low");
             let (risk_colour, risk_icon) = match risk_level {
@@ -380,7 +427,7 @@ fn print_pipeline_result(outputs: &[harnesscode_core::multi_agent::AgentOutput])
         }
 
         // ── Reviewer: colour verdict ──────────────────────────────────────────
-        if output.role == harnesscode_core::multi_agent::AgentRole::Reviewer {
+        if output.role == AgentRole::Reviewer {
             let verdict_colour = if output.success { "\x1b[32m" } else { "\x1b[31m" };
             println!("        {verdict_colour}Verdict: {}\x1b[0m", output.summary);
             if let Some(issues) = output.payload.get("issues").and_then(|i| i.as_array()) {
@@ -416,10 +463,21 @@ async fn main() {
         .init();
 
     // ── Subcommands ──────────────────────────────────────────────────────────
-    if let Some(Commands::Config { action }) = cli.command {
-        match action {
-            ConfigAction::Init => { cmd_config_init(); return; }
-            ConfigAction::Show => { cmd_config_show(); return; }
+    if let Some(cmd) = cli.command {
+        match cmd {
+            Commands::Config { action } => {
+                match action {
+                    ConfigAction::Init => cmd_config_init(),
+                    ConfigAction::Show => cmd_config_show(),
+                }
+                return;
+            }
+            Commands::Context { action } => {
+                match action {
+                    ContextAction::Init => cmd_context_init(),
+                }
+                return;
+            }
         }
     }
 
@@ -454,13 +512,22 @@ async fn main() {
         }
     };
 
-    let controller = Controller::new(3, llm);
+    let controller = {
+        let mut c = Controller::new(3, llm);
+        // CLI flag > config file > default (100)
+        let max_turns = cli.max_tool_turns
+            .or_else(|| load_config().max_tool_turns);
+        if let Some(turns) = max_turns {
+            c = c.with_max_tool_turns(turns);
+        }
+        c
+    };
 
     // Spawn the pipeline on a separate task; receive progress events on this thread.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(16);
     let task_clone = task.clone();
     let pipeline = tokio::spawn(async move {
-        controller.run_with_progress(&task_clone, Some(tx)).await
+        controller.run_with_progress(&task_clone, Some(tx), None).await
     });
 
     // Label/icon for each agent role.
@@ -509,10 +576,45 @@ async fn main() {
                     }
                 }
             }
+            PipelineEvent::PlanReady { steps, affected_files, complexity } => {
+                // The Planner spinner was already finished by StageCompleted.
+                // Print the todo list directly to stdout.
+                let complexity_colour = match complexity.as_str() {
+                    "high"   => "\x1b[31m",
+                    "medium" => "\x1b[33m",
+                    _        => "\x1b[32m",
+                };
+                println!(
+                    "\n  📋  Execution Plan  (complexity: {complexity_colour}{}\x1b[0m)\n",
+                    complexity.to_uppercase()
+                );
+                for (i, step) in steps.iter().enumerate() {
+                    println!("    {}. {step}", i + 1);
+                }
+                if !affected_files.is_empty() {
+                    println!("\n  📁  Files to change:");
+                    for f in &affected_files {
+                        println!("      • {f}");
+                    }
+                }
+                println!();
+            }
             PipelineEvent::PipelineFailed { error } => {
                 if let Some(pb) = current_pb.take() {
                     pb.finish_with_message(format!("❌  {error}"));
                 }
+            }
+            PipelineEvent::NetworkError { category, message, role } => {
+                let (icon, label) = stage_label(role);
+                let cat_colour = match category.as_str() {
+                    "request_timeout"  => "\x1b[33m",
+                    "connection_error" => "\x1b[31m",
+                    "rate_limited"     => "\x1b[35m",
+                    _                  => "\x1b[33m",
+                };
+                eprintln!(
+                    "  ⚠️   {icon}  {label}   {cat_colour}[{category}]\x1b[0m {message}"
+                );
             }
         }
     }

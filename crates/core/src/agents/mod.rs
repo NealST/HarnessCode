@@ -13,11 +13,16 @@
 //! | [`reviewer`]| Validates correctness and decides pass/fail |
 
 pub mod coder;
+pub mod drift_judge;
 pub mod planner;
 pub mod reviewer;
 pub mod risk;
 
 pub use coder::LlmCoderAgent;
+pub use drift_judge::{
+    DriftCallback, DriftConfig, DriftDecision, DriftJudgeAgent, DriftKind, DriftParams,
+    DriftSignal, TurnSummary,
+};
 pub use planner::LlmPlannerAgent;
 pub use reviewer::LlmReviewerAgent;
 pub use risk::LlmRiskAgent;
@@ -51,6 +56,14 @@ pub enum AgentError {
     /// A safety guardrail was triggered during execution.
     #[error("guardrail violation: {0}")]
     GuardrailViolation(#[from] crate::controller::guardrails::GuardrailViolation),
+
+    /// The user decided to abort the pipeline after drift was detected.
+    #[error("pipeline aborted by user after drift detection")]
+    DriftAborted,
+
+    /// The user requested a pipeline restart with a reinforced prompt.
+    #[error("drift restart requested")]
+    DriftRestart { reinforced_prompt: String },
 }
 
 // ──────────────────────────────────────────────

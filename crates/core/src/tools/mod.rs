@@ -113,6 +113,18 @@ impl ToolRegistry {
         r
     }
 
+    /// Create a registry with read-only sensor tools only (no actuators).
+    ///
+    /// Used by the Planner agent to safely explore the codebase before writing
+    /// a grounded execution plan.  Write and shell-execution tools are excluded.
+    pub fn with_sensors() -> Self {
+        let mut r = Self::empty();
+        r.register(ReadFileTool);
+        r.register(ListDirectoryTool);
+        r.register(SearchFilesTool);
+        r
+    }
+
     /// Register an additional tool (builtin or user-defined skill).
     pub fn register(&mut self, tool: impl Tool + 'static) {
         self.tools.insert(tool.def().name.clone(), Box::new(tool));

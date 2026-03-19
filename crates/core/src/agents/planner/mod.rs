@@ -1,19 +1,34 @@
 //! Planner agent — decomposes a coding task into an ordered execution plan.
+//!
+//! The planner uses a **read-only tool loop** to explore the codebase before
+//! writing its plan.  It only has access to sensor tools (`read_file`,
+//! `list_directory`, `search_files`), so it can never modify anything.
 
 pub mod context;
 
-use super::{parse_json_or_wrap, simple_complete, Agent, AgentError, AgentOutput, AgentRole};
-use crate::llm::LlmProvider;
-use crate::observability::TokenUsage;
+use super::{parse_json_or_wrap, Agent, AgentError, AgentOutput, AgentRole};
+use crate::controller::{guardrails::ExecutionGuard, tool_loop::run_tool_loop};
+use crate::llm::{LlmMessage, LlmProvider};
+use crate::observability::ObsCtx;
+use crate::tools::ToolRegistry;
 use std::sync::Arc;
 use tracing::info;
 
-/// Planner agent backed by an LLM.
+/// Planner agent backed by an LLM with read-only tool access.
 ///
-/// Receives a free-text task description and returns a structured JSON plan
-/// listing steps, affected files, success criteria, and complexity.
+/// Drives a sensor-only `run_tool_loop`:
+/// 1. The LLM calls `list_directory`, `search_files`, and `read_file` to
+///    understand the real codebase structure.
+/// 2. Once it has enough context, it produces a final JSON plan referencing
+///    actual file paths.
+///
+/// The `guard` should be built from [`ToolRegistry::with_sensors`] limits —
+/// a lean step budget (≤ 10 turns) and a short timeout are recommended.
 pub struct LlmPlannerAgent {
     pub llm: Arc<dyn LlmProvider>,
+    pub registry: Arc<ToolRegistry>,
+    pub guard: Arc<ExecutionGuard>,
+    pub obs: ObsCtx,
 }
 
 #[async_trait::async_trait]
@@ -23,24 +38,38 @@ impl Agent for LlmPlannerAgent {
     }
 
     async fn execute(&self, task: &str) -> Result<AgentOutput, AgentError> {
-        info!(role = %AgentRole::Planner, "Analysing task and building execution plan");
+        info!(role = %AgentRole::Planner, "Exploring codebase and building execution plan");
 
-        let response = simple_complete(&self.llm, context::SYSTEM, context::user_message(task)).await?;
-        let tokens = Some(TokenUsage::from(&response));
-        let payload = parse_json_or_wrap(&response.content);
+        let messages = vec![
+            LlmMessage::system(context::SYSTEM),
+            LlmMessage::user(context::user_message(task)),
+        ];
 
-        let summary = payload
+        let (text, tokens) =
+            run_tool_loop(&self.llm, messages, &self.registry, &self.guard, &self.obs, None).await?;
+        let payload = parse_json_or_wrap(&text);
+
+        // A valid plan must have a non-empty `steps` array.  If the LLM returned
+        // something that couldn't be parsed as JSON (wrapped in `{"raw":"..."}`) or
+        // a JSON object without `steps`, mark the output as a failure so the
+        // controller's retry logic can kick in.
+        let steps = payload
             .get("steps")
-            .and_then(|s| s.as_array())
-            .map(|steps| format!("Plan ready: {} step(s)", steps.len()))
-            .unwrap_or_else(|| "Execution plan generated".to_string());
+            .and_then(|s| s.as_array());
+        let has_valid_plan = steps.map(|a| !a.is_empty()).unwrap_or(false);
+
+        let summary = if has_valid_plan {
+            format!("Plan ready: {} step(s)", steps.unwrap().len())
+        } else {
+            "Planner did not produce a valid JSON plan".to_string()
+        };
 
         Ok(AgentOutput {
             role: AgentRole::Planner,
             summary,
             payload,
-            success: true,
-            tokens,
+            success: has_valid_plan,
+            tokens: Some(tokens),
         })
     }
 }

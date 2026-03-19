@@ -2,14 +2,15 @@
 //!
 //! The Controller is the "safety harness" around the multi-agent pipeline:
 //! * Drives the Planner → Coder → Risk → Reviewer sequence.
-//! * Enforces retry limits and timeout budgets.
+//! * Enforces retry limits and step budgets.
 //! * Constructs a fresh [`ExecutionGuard`] for each attempt so resource budgets
 //!   reset cleanly between retries.
-//! * Handles [`GuardrailViolation`] failures with per-type strategies.
+//! * Handles agent errors with retry strategies.
 
 use super::events::PipelineEvent;
-use super::guardrails::{ExecutionGuard, GuardrailViolation};
+use super::guardrails::ExecutionGuard;
 use crate::agents::{
+    drift_judge::{DriftCallback, DriftConfig, DriftJudgeAgent, DriftParams},
     Agent, AgentError, AgentOutput, AgentRole, LlmCoderAgent, LlmPlannerAgent, LlmReviewerAgent,
     LlmRiskAgent,
 };
@@ -18,14 +19,9 @@ use crate::observability::{
     NoopSink, ObsCtx, SpanKind, SpanSink, SpanStatus, SpanTimer, TokenUsage,
 };
 use crate::tools::ToolRegistry;
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
-
-/// Default timeout given to a *retry* attempt: 50% of the original limit.
-const RETRY_TIMEOUT_FACTOR: f64 = 0.5;
 
 // ──────────────────────────────────────────────
 // Controller
@@ -50,56 +46,38 @@ pub struct Controller {
     /// Observability sink — receives spans emitted during pipeline execution.
     /// Defaults to [`NoopSink`]; override with [`Controller::with_obs`].
     pub obs_sink: Arc<dyn SpanSink>,
+    /// Optional drift-detection judge.  `None` disables drift detection.
+    pub drift_judge: Option<Arc<DriftJudgeAgent>>,
+    /// Drift detection configuration (only used when `drift_judge` is `Some`).
+    pub drift_config: DriftConfig,
 }
 
 /// Sharable configuration for [`ExecutionGuard`] construction.
 #[derive(Clone)]
 pub struct ExecutionGuardTemplate {
     pub max_tool_turns: usize,
-    pub pipeline_timeout: Option<Duration>,
-    pub max_concurrent_tools: usize,
 }
 
 impl Default for ExecutionGuardTemplate {
     fn default() -> Self {
         Self {
-            max_tool_turns: 20,
-            pipeline_timeout: Some(Duration::from_secs(300)),
-            max_concurrent_tools: 8,
+            max_tool_turns: 100,
         }
     }
 }
 
 impl ExecutionGuardTemplate {
-    /// Per-tool call-count limits shared by all guard builds.
-    fn per_tool_limits() -> HashMap<&'static str, usize> {
-        let mut m = HashMap::with_capacity(3);
-        m.insert("run_command", 10);
-        m.insert("write_file", 50);
-        m.insert("apply_diff", 50);
-        m
-    }
-
     fn build(&self) -> ExecutionGuard {
-        ExecutionGuard::new(
-            self.max_tool_turns,
-            self.pipeline_timeout,
-            self.max_concurrent_tools,
-            Self::per_tool_limits(),
-        )
+        ExecutionGuard::new(self.max_tool_turns)
     }
 
-    /// Build a guard for a retry attempt using a reduced timeout.
-    fn build_retry(&self) -> ExecutionGuard {
-        let retry_timeout = self.pipeline_timeout.map(|t| {
-            Duration::from_secs_f64(t.as_secs_f64() * RETRY_TIMEOUT_FACTOR)
-        });
-        ExecutionGuard::new(
-            self.max_tool_turns,
-            retry_timeout,
-            self.max_concurrent_tools,
-            Self::per_tool_limits(),
-        )
+    /// Build a guard for the Planner's read-only exploration loop.
+    ///
+    /// No step budget — the Planner only has sensor tools and cannot modify
+    /// anything, so the worst case is extra token spend (bounded by the LLM
+    /// provider's own limits).  Only dedup applies.
+    fn build_planner(&self) -> ExecutionGuard {
+        ExecutionGuard::unlimited()
     }
 }
 
@@ -112,6 +90,8 @@ impl Controller {
             registry: Arc::new(ToolRegistry::with_builtins()),
             guard_template: ExecutionGuardTemplate::default(),
             obs_sink: Arc::new(NoopSink),
+            drift_judge: None,
+            drift_config: DriftConfig::default(),
         }
     }
 
@@ -127,6 +107,8 @@ impl Controller {
             registry,
             guard_template: ExecutionGuardTemplate::default(),
             obs_sink: Arc::new(NoopSink),
+            drift_judge: None,
+            drift_config: DriftConfig::default(),
         }
     }
 
@@ -141,21 +123,66 @@ impl Controller {
         self
     }
 
+    /// Attach a drift-detection judge.  Returns `self` for builder-style chaining.
+    ///
+    /// The `judge` can use a different (e.g. cheaper) LLM model from the main pipeline.
+    ///
+    /// ```rust,ignore
+    /// let controller = Controller::new(3, main_llm)
+    ///     .with_drift(DriftJudgeAgent { llm: cheap_llm }, DriftConfig::default());
+    /// ```
+    pub fn with_drift(mut self, judge: DriftJudgeAgent, config: DriftConfig) -> Self {
+        self.drift_judge = Some(Arc::new(judge));
+        self.drift_config = config;
+        self
+    }
+
+    /// Override the maximum tool-call turns per agent execution.
+    ///
+    /// ```rust,ignore
+    /// let controller = Controller::new(3, llm)
+    ///     .with_max_tool_turns(50);
+    /// ```
+    pub fn with_max_tool_turns(mut self, max: usize) -> Self {
+        self.guard_template.max_tool_turns = max;
+        self
+    }
+
     /// Run the pipeline for `prompt`, returning outputs from all four stages.
     pub async fn run(&self, prompt: &str) -> Result<Vec<AgentOutput>, AgentError> {
-        self.run_with_progress(prompt, None).await
+        self.run_with_progress(prompt, None, None).await
     }
 
     /// Run the pipeline, streaming [`PipelineEvent`]s to `tx` for live UI updates.
+    ///
+    /// `drift_callback` is an optional async callback that is invoked when drift is
+    /// detected during the Coder stage.  Pass `None` to disable live drift interaction
+    /// (drift detection itself still runs if a judge was attached via [`with_drift`]).
     pub async fn run_with_progress(
         &self,
         prompt: &str,
         tx: Option<mpsc::Sender<PipelineEvent>>,
+        drift_callback: Option<DriftCallback>,
     ) -> Result<Vec<AgentOutput>, AgentError> {
         macro_rules! send {
             ($event:expr) => {
                 if let Some(ref tx) = tx {
                     let _ = tx.send($event).await;
+                }
+            };
+        }
+
+        /// Emit a `NetworkError` event when the error originates from an LLM
+        /// network / API failure.  Called before `PipelineFailed` so the user
+        /// receives the specific diagnosis first.
+        macro_rules! maybe_send_network_error {
+            ($err:expr, $role:expr) => {
+                if let AgentError::Provider(ref llm_err) = $err {
+                    send!(PipelineEvent::NetworkError {
+                        category: llm_err.error_category().to_string(),
+                        message: llm_err.user_message(),
+                        role: $role,
+                    });
                 }
             };
         }
@@ -166,10 +193,14 @@ impl Controller {
         let pipeline_span_id = pipeline_timer.id;
 
         // Track whether we already used our one timeout-retry.
-        let mut timeout_retried = false;
-        let mut next_retry_is_timeout = false;
         let mut attempt = 0usize;
         let result: Result<Vec<AgentOutput>, AgentError>;
+
+        // The effective prompt may be reinforced on a drift-triggered restart.
+        // `original_prompt` is fixed for the lifetime of this call so the judge
+        // always receives the true user intent, never the reinforced variant.
+        let original_prompt = prompt.to_string();
+        let mut effective_prompt = original_prompt.clone();
 
         // Accumulate total tokens across all agents across all attempts.
         let mut pipeline_tokens = TokenUsage::default();
@@ -178,28 +209,41 @@ impl Controller {
             attempt += 1;
             info!(attempt, "Starting pipeline run");
 
-            let use_reduced = next_retry_is_timeout;
-            next_retry_is_timeout = false;
-            let guard = Arc::new(if use_reduced {
-                self.guard_template.build_retry()
-            } else {
-                self.guard_template.build()
-            });
+            let guard = Arc::new(self.guard_template.build());
 
             // Coder's ObsCtx is a child of the pipeline span so its ToolTurn/
             // ToolCall children nest correctly in the span tree.
             let coder_obs = obs.child(pipeline_span_id);
 
             // Construct agents.
-            let planner    = LlmPlannerAgent  { llm: Arc::clone(&self.llm) };
-            let coder      = LlmCoderAgent    { llm: Arc::clone(&self.llm), registry: Arc::clone(&self.registry), guard: Arc::clone(&guard), obs: coder_obs };
+            let sensor_registry = Arc::new(crate::tools::ToolRegistry::with_sensors());
+            let planner_guard   = Arc::new(self.guard_template.build_planner());
+            let planner_obs     = obs.child(pipeline_span_id);
+            let planner = LlmPlannerAgent {
+                llm:      Arc::clone(&self.llm),
+                registry: sensor_registry,
+                guard:    planner_guard,
+                obs:      planner_obs,
+            };
+            // Build drift params for the coder if a judge and callback are available.
+            let coder_drift = self.drift_judge.as_ref()
+                .zip(drift_callback.as_ref())
+                .map(|(judge, callback)| DriftParams {
+                    judge: Arc::clone(judge),
+                    config: self.drift_config.clone(),
+                    // Always use the immutable original prompt so the judge
+                    // sees the user's real intent even after a restart.
+                    original_prompt: original_prompt.clone(),
+                    callback: Arc::clone(callback),
+                });
+            let coder      = LlmCoderAgent    { llm: Arc::clone(&self.llm), registry: Arc::clone(&self.registry), guard: Arc::clone(&guard), obs: coder_obs, drift: coder_drift };
             let risk_agent = LlmRiskAgent     { llm: Arc::clone(&self.llm) };
             let reviewer   = LlmReviewerAgent { llm: Arc::clone(&self.llm) };
 
             // ── Stage 1: Planning ────────────────────────────────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Planner });
             let stage_timer = SpanTimer::start();
-            let plan_result = planner.execute(prompt).await;
+            let plan_result = planner.execute(&effective_prompt).await;
             let plan_tokens = plan_result.as_ref().ok().and_then(|o| o.tokens);
             if let Some(t) = plan_tokens { pipeline_tokens.add(t); }
             let plan_span_status = match &plan_result {
@@ -210,6 +254,7 @@ impl Controller {
             obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Planner, attempt }, plan_span_status, plan_tokens));
             let plan = match plan_result {
                 Err(e) => {
+                    maybe_send_network_error!(e, AgentRole::Planner);
                     send!(PipelineEvent::PipelineFailed { error: e.to_string() });
                     result = Err(e);
                     break;
@@ -223,7 +268,27 @@ impl Controller {
                 Ok(o) => o,
             };
             send!(PipelineEvent::StageCompleted { output: plan.clone() });
-
+            // ── Emit PlanReady so consumers can show the todo list ──────────────────
+            {
+                let steps: Vec<String> = plan.payload
+                    .get("steps")
+                    .and_then(|s| s.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                if !steps.is_empty() {
+                    let affected_files: Vec<String> = plan.payload
+                        .get("affected_files")
+                        .and_then(|af| af.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                        .unwrap_or_default();
+                    let complexity = plan.payload
+                        .get("complexity")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("medium")
+                        .to_string();
+                    send!(PipelineEvent::PlanReady { steps, affected_files, complexity });
+                }
+            }
             // ── Stage 2: Coding with guardrails ──────────────────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Coder });
             let stage_timer = SpanTimer::start();
@@ -234,28 +299,39 @@ impl Controller {
             let code_span_status = match &code_result {
                 Ok(o) if o.success => SpanStatus::Ok,
                 Ok(o) => SpanStatus::Retried { reason: o.summary.clone() },
-                // A timeout that will be retried is semantically "retried", not a hard error.
-                Err(AgentError::GuardrailViolation(GuardrailViolation::Timeout { .. }))
-                    if !timeout_retried && attempt < self.max_retries =>
-                    SpanStatus::Retried { reason: "timeout".into() },
+                // Drift restart is also a retry, not an error.
+                Err(AgentError::DriftRestart { .. }) =>
+                    SpanStatus::Retried { reason: "drift restart".into() },
                 Err(e) => SpanStatus::Error { message: e.to_string() },
             };
             obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Coder, attempt }, code_span_status, code_tokens));
             let code_output = match code_result {
-                Err(AgentError::GuardrailViolation(GuardrailViolation::Timeout { .. })) => {
-                    if !timeout_retried && attempt < self.max_retries {
-                        timeout_retried = true;
-                        next_retry_is_timeout = true;
-                        warn!("Coder timed out — retrying with 50% timeout budget");
-                        send!(PipelineEvent::PipelineFailed { error: "Coder timed out, retrying with reduced budget".into() });
-                        continue;
-                    }
-                    send!(PipelineEvent::PipelineFailed { error: "Coder timed out (retry exhausted)".into() });
-                    result = Err(AgentError::MaxRetriesExceeded(self.max_retries));
+                Err(AgentError::DriftAborted) => {
+                    warn!("Pipeline aborted by user after drift detection");
+                    send!(PipelineEvent::PipelineFailed {
+                        error: "Pipeline aborted by user after drift detection".into()
+                    });
+                    result = Err(AgentError::DriftAborted);
                     break;
+                }
+                Err(AgentError::DriftRestart { reinforced_prompt }) => {
+                    warn!("Drift restart requested — reinforcing prompt and retrying");
+                    effective_prompt = reinforced_prompt;
+                    if attempt >= self.max_retries {
+                        send!(PipelineEvent::PipelineFailed {
+                            error: "Drift restart attempted but retry limit reached".into()
+                        });
+                        result = Err(AgentError::MaxRetriesExceeded(self.max_retries));
+                        break;
+                    }
+                    send!(PipelineEvent::PipelineFailed {
+                        error: "Drift detected — restarting with reinforced prompt".into()
+                    });
+                    continue;
                 }
                 Err(e) => {
                     warn!(error = %e, "Coder failed");
+                    maybe_send_network_error!(e, AgentRole::Coder);
                     send!(PipelineEvent::PipelineFailed { error: e.to_string() });
                     if attempt >= self.max_retries { result = Err(AgentError::MaxRetriesExceeded(self.max_retries)); break; }
                     continue;
@@ -313,6 +389,7 @@ impl Controller {
             obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Reviewer, attempt }, review_span_status, review_tokens));
             let review = match review_result {
                 Err(e) => {
+                    maybe_send_network_error!(e, AgentRole::Reviewer);
                     send!(PipelineEvent::PipelineFailed { error: e.to_string() });
                     result = Err(e);
                     break;
@@ -430,13 +507,22 @@ mod tests {
         let llm: Arc<dyn LlmProvider> = Arc::new(MockLlmProvider);
         let guard = Arc::new(ExecutionGuard::default());
 
-        assert_eq!(LlmPlannerAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Planner);
+        assert_eq!(
+            LlmPlannerAgent {
+                llm:      Arc::clone(&llm),
+                registry: Arc::new(crate::tools::ToolRegistry::with_sensors()),
+                guard:    Arc::clone(&guard),
+                obs:      crate::observability::ObsCtx::noop(),
+            }.role(),
+            AgentRole::Planner,
+        );
         assert_eq!(
             LlmCoderAgent {
                 llm: Arc::clone(&llm),
                 registry: Arc::new(crate::tools::ToolRegistry::empty()),
                 guard,
                 obs: crate::observability::ObsCtx::noop(),
+                drift: None,
             }
             .role(),
             AgentRole::Coder

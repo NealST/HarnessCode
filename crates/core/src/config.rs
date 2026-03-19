@@ -62,6 +62,9 @@ pub struct ProfileConfig {
 pub struct HarnessConfig {
     /// Which profile to use when none is specified explicitly.
     pub default_profile: Option<String>,
+    /// Maximum tool-call turns before the guardrail terminates the agent loop.
+    /// Defaults to 100 when absent.
+    pub max_tool_turns: Option<usize>,
     /// Named provider profiles.
     #[serde(default)]
     pub profiles: HashMap<String, ProfileConfig>,
@@ -134,6 +137,9 @@ pub fn load_config() -> HarnessConfig {
 fn merge_config(base: &mut HarnessConfig, src: HarnessConfig) {
     if src.default_profile.is_some() {
         base.default_profile = src.default_profile;
+    }
+    if src.max_tool_turns.is_some() {
+        base.max_tool_turns = src.max_tool_turns;
     }
     for (name, profile) in src.profiles {
         base.profiles.insert(name, profile);
@@ -314,6 +320,7 @@ mod tests {
     fn merge_config_project_wins() {
         let mut base = HarnessConfig {
             default_profile: Some("openai".to_string()),
+            max_tool_turns: None,
             profiles: {
                 let mut m = HashMap::new();
                 m.insert(
@@ -331,6 +338,7 @@ mod tests {
 
         let project = HarnessConfig {
             default_profile: Some("anthropic".to_string()),
+            max_tool_turns: None,
             profiles: {
                 let mut m = HashMap::new();
                 m.insert(

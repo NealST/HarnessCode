@@ -11,6 +11,8 @@
 //! Both formats are plain Markdown so they can be committed to version control
 //! and inspected by humans at any time.
 
+pub mod agents_md;
+
 use serde::{Deserialize, Serialize};
 
 // ──────────────────────────────────────────────

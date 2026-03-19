@@ -29,6 +29,7 @@
 pub mod commands;
 pub mod obs;
 
+use harnesscode_core::agents::DriftDecision;
 use harnesscode_core::controller::PipelineEvent;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -42,6 +43,10 @@ use tokio::sync::Mutex;
 #[derive(Default)]
 pub struct PipelineState {
     pub cancel_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Resolves the drift-decision oneshot when the user submits a decision
+    /// via [`commands::submit_drift_decision`].  `None` when no drift prompt
+    /// is currently active.
+    pub drift_decision_tx: Mutex<Option<tokio::sync::oneshot::Sender<DriftDecision>>>,
 }
 
 // ──────────────────────────────────────────────
@@ -53,8 +58,22 @@ pub struct PipelineState {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PipelineEventDto {
     StageStarted { role: String },
+    /// The planner finished and produced an ordered action plan.
+    PlanReady {
+        steps: Vec<String>,
+        affected_files: Vec<String>,
+        complexity: String,
+    },
     StageCompleted { role: String, summary: String, success: bool },
     PipelineFailed { error: String },
+    /// Emitted directly by the drift callback (not via the mpsc channel).
+    DriftDetected { kind: String, reason: String },
+    /// A network or API error occurred during an LLM request.
+    NetworkError {
+        category: String,
+        message: String,
+        role: String,
+    },
 }
 
 impl From<PipelineEvent> for PipelineEventDto {
@@ -63,12 +82,16 @@ impl From<PipelineEvent> for PipelineEventDto {
             PipelineEvent::StageStarted { role } => Self::StageStarted {
                 role: role.to_string(),
             },
+            PipelineEvent::PlanReady { steps, affected_files, complexity } =>
+                Self::PlanReady { steps, affected_files, complexity },
             PipelineEvent::StageCompleted { output } => Self::StageCompleted {
                 role: output.role.to_string(),
                 summary: output.summary.clone(),
                 success: output.success,
             },
             PipelineEvent::PipelineFailed { error } => Self::PipelineFailed { error },
+            PipelineEvent::NetworkError { category, message, role } =>
+                Self::NetworkError { category, message, role: role.to_string() },
         }
     }
 }
@@ -104,6 +127,7 @@ pub struct ProfileDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConfigDto {
     pub default_profile: Option<String>,
+    pub max_tool_turns: Option<usize>,
     pub profiles: Vec<ProfileDto>,
 }
 
@@ -157,7 +181,9 @@ pub fn run() {
             commands::cancel_pipeline,
             commands::get_config,
             commands::save_config_profile,
+            commands::save_settings,
             commands::get_run_history,
+            commands::submit_drift_decision,
         ])
         .run(tauri::generate_context!())
         .expect("error while running HarnessCode desktop application");

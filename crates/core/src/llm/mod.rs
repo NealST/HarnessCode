@@ -178,6 +178,52 @@ pub enum LlmError {
     Stream(String),
 }
 
+impl LlmError {
+    /// Returns `true` if this error is a network request timeout.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, LlmError::Http(e) if e.is_timeout())
+    }
+
+    /// Returns `true` if this is a connection-level network error.
+    pub fn is_connect(&self) -> bool {
+        matches!(self, LlmError::Http(e) if e.is_connect())
+    }
+
+    /// Categorise the error for observability and user-facing display.
+    pub fn error_category(&self) -> &'static str {
+        match self {
+            LlmError::Http(e) if e.is_timeout() => "request_timeout",
+            LlmError::Http(e) if e.is_connect() => "connection_error",
+            LlmError::Http(_) => "network_error",
+            LlmError::Api { status, .. } if *status == 429 => "rate_limited",
+            LlmError::Api { status, .. } if *status >= 500 => "server_error",
+            LlmError::Api { .. } => "api_error",
+            LlmError::MissingApiKey { .. } => "missing_api_key",
+            LlmError::Parse(_) => "parse_error",
+            LlmError::Stream(_) => "stream_error",
+        }
+    }
+
+    /// Human-readable message suitable for end-user display.
+    pub fn user_message(&self) -> String {
+        match self {
+            LlmError::Http(e) if e.is_timeout() =>
+                "LLM 请求超时 — 模型服务器未在规定时间内响应，请检查网络连接或稍后重试。".into(),
+            LlmError::Http(e) if e.is_connect() =>
+                format!("无法连接到 LLM 服务器 — 请检查网络和 API 端点配置。({})", e),
+            LlmError::Http(e) =>
+                format!("LLM 请求网络错误: {}", e),
+            LlmError::Api { status: 429, message } =>
+                format!("API 请求频率超限，请稍后重试。({})", message),
+            LlmError::Api { status, message } if *status >= 500 =>
+                format!("LLM 服务器错误 (HTTP {}): {}", status, message),
+            LlmError::Api { status, message } =>
+                format!("API 错误 (HTTP {}): {}", status, message),
+            other => other.to_string(),
+        }
+    }
+}
+
 // ──────────────────────────────────────────────
 // Provider trait
 // ──────────────────────────────────────────────

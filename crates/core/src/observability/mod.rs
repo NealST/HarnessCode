@@ -147,6 +147,13 @@ pub enum SpanKind {
         /// Whether this call was blocked by a guardrail (rate-limit exceeded).
         blocked: bool,
     },
+    /// An LLM HTTP request that resulted in a network or API error.
+    LlmRequest {
+        /// Which tool-loop iteration was running (0 if before the first turn).
+        turn: usize,
+        /// Error classification: "request_timeout", "connection_error", etc.
+        category: String,
+    },
 }
 
 // ──────────────────────────────────────────────

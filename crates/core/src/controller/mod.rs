@@ -22,4 +22,4 @@ pub mod tool_loop;
 
 pub use controller::Controller;
 pub use events::PipelineEvent;
-pub use guardrails::{ExecutionGuard, GuardrailViolation};
+pub use guardrails::{ExecutionGuard, GuardrailViolation, StepStatus};

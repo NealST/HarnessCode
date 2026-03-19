@@ -4,22 +4,28 @@
 //! the LLM reasons and selects tools; we execute them with guaranteed fidelity
 //! and enforce all safety limits via [`ExecutionGuard`].
 
-use super::guardrails::ExecutionGuard;
+use super::guardrails::{ExecutionGuard, StepStatus};
+use crate::agents::drift_judge::{DriftDecision, DriftParams, DriftSignal, TurnSummary};
 use crate::agents::AgentError;
 use crate::llm::{LlmCompletion, LlmMessage, LlmProvider};
 use crate::observability::{ObsCtx, SpanKind, SpanStatus, TokenUsage};
 use crate::tools::{ToolRegistry, ToolResult};
 use std::sync::Arc;
+use tracing::warn;
 
 /// Run the agentic tool loop until the LLM produces a final text response.
 ///
 /// Returns `(final_text, accumulated_token_usage)`.
 ///
 /// ## Guardrail enforcement order (each iteration)
-/// 1. `check_timeout`         — wall-clock deadline
-/// 2. `increment_turns`       — step budget
-/// 3. `sanitise_calls`        — dedup + concurrent ceiling (silent clamp)
-/// 4. `check_and_record_tool` — per-tool rate limit (ToolResult::err, non-fatal)
+/// 1. `increment_turns`       — step budget (only on `NeedTools`)
+/// 2. `sanitise_calls`        — dedup (silent removal of duplicates)
+///
+/// ## Drift detection
+/// If `drift` is `Some`, the judge is called every `drift.config.check_interval`
+/// turns.  The judge receives the last `window_size` [`TurnSummary`] objects.
+/// If drift is detected the async `drift.callback` is awaited; the result
+/// determines whether to abort, restart with a reinforced prompt, or continue.
 ///
 /// ## Observability events emitted
 /// * One **ToolTurn** span per `NeedTools` iteration.
@@ -30,16 +36,35 @@ pub async fn run_tool_loop(
     registry: &ToolRegistry,
     guard: &ExecutionGuard,
     obs: &ObsCtx,
+    drift: Option<&DriftParams>,
 ) -> Result<(String, TokenUsage), AgentError> {
     let mut turn = 0usize;
     let mut total_tokens = TokenUsage::default();
+    let mut turn_summaries: Vec<TurnSummary> = Vec::new();
 
     loop {
-        // ── Guardrail #1 & #2 ─────────────────────────────────────────────
-        guard.check_timeout()?;
-        guard.increment_turns()?;
+        // Call the LLM.  On network/API failure, record an observability span
+        // before propagating the error so that timeout / connection issues are
+        // visible in the span tree and JSONL logs.
+        let completion = match llm.complete_with_tools(&messages, &registry.defs()).await {
+            Ok(c) => c,
+            Err(llm_err) => {
+                let err_timer = obs.start_span();
+                let category = llm_err.error_category().to_string();
+                let user_msg = llm_err.user_message();
+                warn!(category = %category, "LLM request failed: {user_msg}");
+                obs.record(err_timer.finish(
+                    obs.run_id,
+                    obs.current_span_id,
+                    SpanKind::LlmRequest { turn: turn + 1, category },
+                    SpanStatus::Error { message: user_msg },
+                    None,
+                ));
+                return Err(llm_err.into());
+            }
+        };
 
-        match llm.complete_with_tools(&messages, &registry.defs()).await? {
+        match completion {
             LlmCompletion::Done { text, prompt_tokens, completion_tokens } => {
                 total_tokens.add(TokenUsage::new(
                     prompt_tokens.unwrap_or(0),
@@ -49,6 +74,12 @@ pub async fn run_tool_loop(
             }
 
             LlmCompletion::NeedTools { calls: raw_calls, prompt_tokens, completion_tokens } => {
+                // ── Guardrail #1: step budget ──────────────────────────────
+                // Checked here (inside NeedTools) so that the LLM's final
+                // Done response is never blocked by the counter — only actual
+                // tool-use rounds count against the turn budget.
+                let step_status = guard.increment_turns()?;
+
                 total_tokens.add(TokenUsage::new(
                     prompt_tokens.unwrap_or(0),
                     completion_tokens.unwrap_or(0),
@@ -57,37 +88,25 @@ pub async fn run_tool_loop(
                 let turn_timer = obs.start_span();
                 let turn_span_id = turn_timer.id;
 
-                // ── Guardrail #3: deduplicate + clamp ─────────────────────
+                // ── Guardrail #2: deduplicate ─────────────────────────────
                 let calls = guard.sanitise_calls(raw_calls);
 
                 // Record the assistant's tool-call turn.
                 messages.push(LlmMessage::assistant_tool_calls(calls.clone()));
 
-                // ── Guardrail #4 + dispatch ──────────────────────────────
-                // Phase A: pre-check rate limits for every call (serial, atomic).
-                let mut approved: std::collections::HashSet<usize> = std::collections::HashSet::with_capacity(calls.len());
-                let mut results: Vec<ToolResult> = calls
-                    .iter()
-                    .enumerate()
-                    .map(|(i, call)| match guard.check_and_record_tool(&call.name) {
-                        Ok(()) => {
-                            approved.insert(i);
-                            ToolResult { content: String::new(), is_error: false }
-                        }
-                        Err(violation) => ToolResult::err(format!(
-                            "Tool call blocked by guardrail: {violation}"
-                        )),
-                    })
-                    .collect();
-
-                // Phase B: dispatch all approved calls concurrently.
+                // ── Dispatch all calls concurrently ──────────────────────
                 let dispatched = futures::future::join_all(
-                    approved.iter().map(|&i| {
+                    calls.iter().enumerate().map(|(i, call)| {
                         let call_timer = obs.start_span();
-                        let call = &calls[i];
                         async move { (i, call_timer, registry.dispatch(call).await) }
                     })
                 ).await;
+
+                let mut results: Vec<ToolResult> = calls
+                    .iter()
+                    .map(|_| ToolResult { content: String::new(), is_error: false })
+                    .collect();
+
                 for (idx, call_timer, outcome) in dispatched {
                     let call = &calls[idx];
                     let is_err = outcome.is_error;
@@ -109,26 +128,6 @@ pub async fn run_tool_loop(
                     results[idx] = outcome;
                 }
 
-                // Emit ToolCall spans for guardrail-blocked calls too.
-                for (i, call) in calls.iter().enumerate() {
-                    if results[i].is_error && !approved.contains(&i) {
-                        let blocked_timer = obs.start_span();
-                        obs.record(blocked_timer.finish(
-                            obs.run_id,
-                            Some(turn_span_id),
-                            SpanKind::ToolCall {
-                                tool: call.name.clone(),
-                                call_id: call.id.clone(),
-                                blocked: true,
-                            },
-                            SpanStatus::GuardrailTriggered {
-                                violation: results[i].content.clone(),
-                            },
-                            None,
-                        ));
-                    }
-                }
-
                 // Feed each result back as a tool-result message.
                 for (call, result) in calls.iter().zip(results.iter()) {
                     messages.push(LlmMessage::tool_result(
@@ -136,6 +135,20 @@ pub async fn run_tool_loop(
                         &result.content,
                         result.is_error,
                     ));
+                }
+
+                // ── Guardrail #1b: budget warning ─────────────────────────
+                // When 80 % of the step budget is consumed, inject a system
+                // hint so the LLM starts wrapping up gracefully instead of
+                // being hard-cut at the limit.
+                if let StepStatus::Warning { used, remaining } = step_status {
+                    warn!(used, remaining, "Step budget 80% consumed — injecting wrap-up hint");
+                    messages.push(LlmMessage::system(format!(
+                        "[SYSTEM] You have used {used} of your tool-call budget. \
+                         Only {remaining} tool-call rounds remain before the hard limit. \
+                         Please wrap up your current task, produce a final response, \
+                         and avoid starting new exploratory work."
+                    )));
                 }
 
                 // ── Emit ToolTurn span ────────────────────────────────────
@@ -146,6 +159,75 @@ pub async fn run_tool_loop(
                     SpanStatus::Ok,
                     None,
                 ));
+
+                // ── Drift detection ───────────────────────────────────────
+                if let Some(dp) = drift {
+                    // Record a lightweight summary of this turn.
+                    let args_json = serde_json::to_string(&calls)
+                        .unwrap_or_default();
+                    // Single-pass truncation: take(500) stops at the char boundary,
+                    // then compare lengths to know whether we actually truncated.
+                    let truncated: String = args_json.chars().take(500).collect();
+                    let snippet = if truncated.len() < args_json.len() {
+                        format!("{truncated}…")
+                    } else {
+                        truncated
+                    };
+                    turn_summaries.push(TurnSummary {
+                        turn_number: turn,
+                        tools_called: calls.iter().map(|c| c.name.clone()).collect(),
+                        call_args_snippet: snippet,
+                    });
+
+                    // Only check every `check_interval` turns.
+                    if turn % dp.config.check_interval == 0 {
+                        let window_start = turn_summaries
+                            .len()
+                            .saturating_sub(dp.config.window_size);
+                        let window = &turn_summaries[window_start..];
+
+                        match dp.judge.judge(&dp.original_prompt, window).await {
+                            Ok(DriftSignal::Aligned) => {
+                                // On track — continue normally.
+                            }
+                            Ok(signal @ DriftSignal::Drifted { .. }) => {
+                                warn!(
+                                    turn,
+                                    "Drift detected — invoking callback for user decision"
+                                );
+                                let reason = match &signal {
+                                    DriftSignal::Drifted { reason, .. } => reason.clone(),
+                                    DriftSignal::Aligned => unreachable!(),
+                                };
+                                let decision = (dp.callback)(signal).await;
+                                match decision {
+                                    DriftDecision::Stop => {
+                                        return Err(AgentError::DriftAborted);
+                                    }
+                                    DriftDecision::Restart => {
+                                        let reinforced = format!(
+                                            "原始目标：{original}\n\n在执行过程中，检测到以下偏移：{reason}\n\n\
+请确保新一轮的所有操作严格服务于原始目标，\
+不要引入与原始目标无关的更改。",
+                                            original = dp.original_prompt,
+                                            reason = reason,
+                                        );
+                                        return Err(AgentError::DriftRestart {
+                                            reinforced_prompt: reinforced,
+                                        });
+                                    }
+                                    DriftDecision::Ignore => {
+                                        // User chose to continue; proceed normally.
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // Judge failure is non-fatal — log and continue.
+                                warn!(error = %e, "Drift judge failed (non-fatal, continuing)");
+                            }
+                        }
+                    }
+                }
             }
         }
     }
