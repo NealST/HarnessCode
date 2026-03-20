@@ -14,11 +14,11 @@ fn process(data: Vec<i32>) -> Vec<i32> {
     let filtered: Vec<_> = data.into_iter()
         .filter(|x| *x > 0)
         .collect();  // Unnecessary allocation
-    
+
     let mapped: Vec<_> = filtered.into_iter()
         .map(|x| x * 2)
         .collect();  // Another unnecessary allocation
-    
+
     mapped.into_iter()
         .take(10)
         .collect()
@@ -29,7 +29,7 @@ fn has_positive(data: &[i32]) -> bool {
     let positives: Vec<_> = data.iter()
         .filter(|&&x| x > 0)
         .collect();  // Allocates entire filtered result
-    
+
     !positives.is_empty()
 }
 ```
@@ -56,31 +56,31 @@ fn has_positive(data: &[i32]) -> bool {
 
 These methods return iterators (lazy):
 
-| Method | Description |
-|--------|-------------|
-| `.filter()` | Keep matching elements |
-| `.map()` | Transform elements |
-| `.take(n)` | Limit to n elements |
-| `.skip(n)` | Skip first n elements |
-| `.zip()` | Pair with another iterator |
-| `.chain()` | Concatenate iterators |
-| `.flat_map()` | Map and flatten |
-| `.enumerate()` | Add index |
+| Method         | Description                |
+| -------------- | -------------------------- |
+| `.filter()`    | Keep matching elements     |
+| `.map()`       | Transform elements         |
+| `.take(n)`     | Limit to n elements        |
+| `.skip(n)`     | Skip first n elements      |
+| `.zip()`       | Pair with another iterator |
+| `.chain()`     | Concatenate iterators      |
+| `.flat_map()`  | Map and flatten            |
+| `.enumerate()` | Add index                  |
 
 ## Consuming Methods
 
 These methods consume the iterator (evaluate immediately):
 
-| Method | Description |
-|--------|-------------|
-| `.collect()` | Gather into collection |
-| `.for_each()` | Execute side effect |
-| `.count()` | Count elements |
-| `.sum()` | Sum elements |
-| `.fold()` | Accumulate value |
-| `.any()` | Check if any match |
-| `.all()` | Check if all match |
-| `.find()` | Find first match |
+| Method        | Description            |
+| ------------- | ---------------------- |
+| `.collect()`  | Gather into collection |
+| `.for_each()` | Execute side effect    |
+| `.count()`    | Count elements         |
+| `.sum()`      | Sum elements           |
+| `.fold()`     | Accumulate value       |
+| `.any()`      | Check if any match     |
+| `.all()`      | Check if all match     |
+| `.find()`     | Find first match       |
 
 ## Short-Circuit Benefits
 

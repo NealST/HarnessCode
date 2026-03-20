@@ -1,7 +1,7 @@
 //! The cybernetic Controller — schedules agents and enforces pipeline-level rules.
 //!
 //! The Controller is the "safety harness" around the multi-agent pipeline:
-//! * Drives the Planner → Coder → Risk → Reviewer sequence.
+//! * Drives the Judge → Scoper → Planner → Coder → Risk → Reviewer sequence.
 //! * Enforces retry limits and step budgets.
 //! * Constructs a fresh [`ExecutionGuard`] for each attempt so resource budgets
 //!   reset cleanly between retries.
@@ -9,10 +9,12 @@
 
 use super::events::PipelineEvent;
 use super::guardrails::ExecutionGuard;
+use super::interaction::{ClarificationCallback, ClarificationRequest, ClarificationResolution};
+use super::request_context::RequestContext;
 use crate::agents::{
     drift_judge::{DriftCallback, DriftConfig, DriftJudgeAgent, DriftParams},
-    Agent, AgentError, AgentOutput, AgentRole, LlmCoderAgent, LlmPlannerAgent, LlmReviewerAgent,
-    LlmRiskAgent,
+    Agent, AgentError, AgentOutput, AgentRole, JudgeAgent, LlmCoderAgent, LlmPlannerAgent,
+    LlmReviewerAgent, LlmRiskAgent, LlmScoperAgent,
 };
 use crate::llm::LlmProvider;
 use crate::observability::{
@@ -30,10 +32,12 @@ use tracing::{info, warn};
 /// The cybernetic controller that drives the multi-agent pipeline.
 ///
 /// Implements a **TOTE** (Test-Operate-Test-Exit) loop:
-/// 1. **Test** — Planner evaluates the current state vs. the desired goal.
-/// 2. **Operate** — Coder applies changes (with tool calls + guardrails).
-/// 3. **Test** — Reviewer checks the result against success criteria.
-/// 4. **Exit** — Loop terminates on success or after `max_retries` failures.
+/// 1. **Judge** — Decide whether the request needs clarification, scoping, or direct planning.
+/// 2. **Frame** — Scoper defines the real problem, its boundaries, and success conditions when needed.
+/// 3. **Test** — Planner evaluates the current state vs. the desired goal.
+/// 4. **Operate** — Coder applies changes (with tool calls + guardrails).
+/// 5. **Test** — Reviewer checks the result against success criteria.
+/// 6. **Exit** — Loop terminates on success or after `max_retries` failures.
 pub struct Controller {
     /// Maximum number of full pipeline retries before giving up.
     pub max_retries: usize,
@@ -79,6 +83,57 @@ impl ExecutionGuardTemplate {
     fn build_planner(&self) -> ExecutionGuard {
         ExecutionGuard::unlimited()
     }
+
+    /// Build a guard for the Scoper's read-only framing loop.
+    fn build_scoper(&self) -> ExecutionGuard {
+        ExecutionGuard::new(self.max_tool_turns.min(8))
+    }
+}
+
+fn synthetic_scope(request_context: &RequestContext) -> AgentOutput {
+    let prompt = request_context.current_request.trim();
+    let relevant_files = request_context.session_state.known_relevant_files.clone();
+    let inherited_success = request_context
+        .session_state
+        .last_scope
+        .as_ref()
+        .map(|scope| payload_strings(scope, "success_criteria"))
+        .filter(|criteria| !criteria.is_empty())
+        .unwrap_or_else(|| vec!["The implementation matches the stated request".to_string()]);
+    let assumptions = if request_context.has_meaningful_context() {
+        vec!["Interpret the request together with the supplied conversation and session state"]
+    } else {
+        vec!["The user request is already sufficiently specific"]
+    };
+    AgentOutput {
+        role: AgentRole::Scoper,
+        summary: "Problem framed from a well-specified request".to_string(),
+        payload: serde_json::json!({
+            "task_type": "other",
+            "objective": prompt,
+            "problem_statement": prompt,
+            "in_scope": ["Implement the user request exactly as stated"],
+            "out_of_scope": ["Unrelated refactors", "Behavior changes outside the stated request"],
+            "constraints": [],
+            "assumptions": assumptions,
+            "unknowns": request_context.session_state.open_questions,
+            "relevant_files": relevant_files,
+            "success_criteria": inherited_success,
+            "needs_user_clarification": false,
+            "clarifying_questions": [],
+            "confidence": "high"
+        }),
+        success: true,
+        tokens: None,
+    }
+}
+
+fn payload_strings(payload: &serde_json::Value, key: &str) -> Vec<String> {
+    payload
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
 }
 
 impl Controller {
@@ -148,9 +203,18 @@ impl Controller {
         self
     }
 
-    /// Run the pipeline for `prompt`, returning outputs from all four stages.
+    /// Run the pipeline for `prompt`, returning outputs from all executed stages.
     pub async fn run(&self, prompt: &str) -> Result<Vec<AgentOutput>, AgentError> {
-        self.run_with_progress(prompt, None, None).await
+        self.run_with_request_context(&RequestContext::from_prompt(prompt), None, None, None)
+            .await
+    }
+
+    /// Run the pipeline for an already-assembled request context.
+    pub async fn run_with_context(
+        &self,
+        request_context: &RequestContext,
+    ) -> Result<Vec<AgentOutput>, AgentError> {
+        self.run_with_request_context(request_context, None, None, None).await
     }
 
     /// Run the pipeline, streaming [`PipelineEvent`]s to `tx` for live UI updates.
@@ -163,6 +227,18 @@ impl Controller {
         prompt: &str,
         tx: Option<mpsc::Sender<PipelineEvent>>,
         drift_callback: Option<DriftCallback>,
+    ) -> Result<Vec<AgentOutput>, AgentError> {
+        self.run_with_request_context(&RequestContext::from_prompt(prompt), tx, drift_callback, None)
+            .await
+    }
+
+    /// Run the pipeline using a full request context, streaming [`PipelineEvent`]s to `tx`.
+    pub async fn run_with_request_context(
+        &self,
+        request_context: &RequestContext,
+        tx: Option<mpsc::Sender<PipelineEvent>>,
+        drift_callback: Option<DriftCallback>,
+        clarification_callback: Option<ClarificationCallback>,
     ) -> Result<Vec<AgentOutput>, AgentError> {
         macro_rules! send {
             ($event:expr) => {
@@ -188,6 +264,8 @@ impl Controller {
         }
 
         // ── Observability root ────────────────────────────────────────────
+        let mut request_context = request_context.clone();
+        let prompt = request_context.current_request.clone();
         let obs = ObsCtx::new_run(Arc::clone(&self.obs_sink));
         let pipeline_timer = SpanTimer::start();
         let pipeline_span_id = pipeline_timer.id;
@@ -199,11 +277,319 @@ impl Controller {
         // The effective prompt may be reinforced on a drift-triggered restart.
         // `original_prompt` is fixed for the lifetime of this call so the judge
         // always receives the true user intent, never the reinforced variant.
-        let original_prompt = prompt.to_string();
+        let original_prompt = prompt.clone();
         let mut effective_prompt = original_prompt.clone();
 
         // Accumulate total tokens across all agents across all attempts.
         let mut pipeline_tokens = TokenUsage::default();
+
+        let sensor_registry = Arc::new(crate::tools::ToolRegistry::with_sensors());
+        let judge = JudgeAgent {
+            llm: Arc::clone(&self.llm),
+        };
+        let scoper_obs = obs.child(pipeline_span_id);
+        let scoper_guard = Arc::new(self.guard_template.build_scoper());
+        let scoper = LlmScoperAgent {
+            llm: Arc::clone(&self.llm),
+            registry: Arc::clone(&sensor_registry),
+            guard: scoper_guard,
+            obs: scoper_obs,
+        };
+
+        // ── Stage 0: Judge ───────────────────────────────────────────────
+        send!(PipelineEvent::StageStarted { role: AgentRole::Judge });
+        let (judge_output, scoper_input, effective_request_override, should_run_scoper) = {
+            let mut clarification_round = 0usize;
+
+            loop {
+                let stage_timer = SpanTimer::start();
+                let judge_result = judge
+                    .judge(&serde_json::to_string(&request_context)?)
+                    .await;
+                let judge_tokens = judge_result.as_ref().ok().and_then(|decision| decision.tokens);
+                if let Some(t) = judge_tokens {
+                    pipeline_tokens.add(t);
+                }
+                let judge_span_status = match &judge_result {
+                    Ok(_) => SpanStatus::Ok,
+                    Err(e) => SpanStatus::Error { message: e.to_string() },
+                };
+                obs.record(stage_timer.finish(
+                    obs.run_id,
+                    Some(pipeline_span_id),
+                    SpanKind::Stage { role: AgentRole::Judge, attempt: clarification_round + 1 },
+                    judge_span_status,
+                    judge_tokens,
+                ));
+
+                let decision = match judge_result {
+                    Ok(decision) => decision,
+                    Err(e) => {
+                        maybe_send_network_error!(e, AgentRole::Judge);
+                        send!(PipelineEvent::PipelineFailed { error: e.to_string() });
+                        result = Err(e);
+                        let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                        obs.record(pipeline_timer.finish(
+                            obs.run_id,
+                            None,
+                            SpanKind::Pipeline { prompt: prompt.clone() },
+                            pipeline_status,
+                            Some(pipeline_tokens),
+                        ));
+                        obs.flush();
+                        return result;
+                    }
+                };
+
+                let judge_output = AgentOutput {
+                    role: AgentRole::Judge,
+                    summary: format!("route={} reason={}", decision.route, decision.route_reason_code),
+                    payload: decision.raw.clone(),
+                    success: true,
+                    tokens: decision.tokens,
+                };
+                send!(PipelineEvent::StageCompleted {
+                    output: judge_output.clone(),
+                });
+                send!(PipelineEvent::JudgeReady {
+                    route: decision.route.clone(),
+                    route_reason_code: decision.route_reason_code.clone(),
+                    ready_for_scoper: decision.ready_for_scoper,
+                    ready_for_planner: decision.ready_for_planner,
+                    ask_user_clarification: decision.ask_user_clarification,
+                    effective_request: decision.effective_request.clone(),
+                    goal_is_concrete: decision.decision_factors.goal_is_concrete,
+                    constraints_are_stable: decision.decision_factors.constraints_are_stable,
+                    history_resolves_references: decision.decision_factors.history_resolves_references,
+                    repository_grounding_needed: decision.decision_factors.repository_grounding_needed,
+                    prior_scope_can_be_reused: decision.decision_factors.prior_scope_can_be_reused,
+                    skip_scoper_criteria_met: decision.skip_scoper_criteria_met.clone(),
+                    missing_information: decision.missing_information.clone(),
+                    clarifying_questions: decision.clarifying_questions.clone(),
+                    confidence: decision.confidence.clone(),
+                });
+
+                if decision.ask_user_clarification {
+                    let Some(callback) = clarification_callback.as_ref() else {
+                        let error = format!(
+                            "Judge requires clarification before continuing: {}",
+                            decision.clarifying_questions.join(" | ")
+                        );
+                        send!(PipelineEvent::PipelineFailed { error: error.clone() });
+                        result = Err(AgentError::ExecutionFailed {
+                            role: AgentRole::Judge,
+                            message: error,
+                        });
+                        let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                        obs.record(pipeline_timer.finish(
+                            obs.run_id,
+                            None,
+                            SpanKind::Pipeline { prompt: prompt.clone() },
+                            pipeline_status,
+                            Some(pipeline_tokens),
+                        ));
+                        obs.flush();
+                        return result;
+                    };
+
+                    send!(PipelineEvent::ClarificationRequested {
+                        source: AgentRole::Judge,
+                        objective: decision.effective_request.clone(),
+                        questions: decision.clarifying_questions.clone(),
+                    });
+                    match callback(ClarificationRequest {
+                        source: AgentRole::Judge,
+                        questions: decision.clarifying_questions.clone(),
+                        objective: decision.effective_request.clone(),
+                    })
+                    .await
+                    {
+                        ClarificationResolution::Abort => {
+                            let error = "Pipeline aborted while waiting for clarification".to_string();
+                            send!(PipelineEvent::PipelineFailed { error: error.clone() });
+                            result = Err(AgentError::ExecutionFailed {
+                                role: AgentRole::Judge,
+                                message: error,
+                            });
+                            let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                            obs.record(pipeline_timer.finish(
+                                obs.run_id,
+                                None,
+                                SpanKind::Pipeline { prompt: prompt.clone() },
+                                pipeline_status,
+                                Some(pipeline_tokens),
+                            ));
+                            obs.flush();
+                            return result;
+                        }
+                        ClarificationResolution::Answer(answer) => {
+                            request_context.apply_clarification(
+                                "judge",
+                                &decision.clarifying_questions,
+                                answer,
+                            );
+                            clarification_round += 1;
+                            if clarification_round >= 3 {
+                                let error = "Too many clarification rounds requested by Judge".to_string();
+                                send!(PipelineEvent::PipelineFailed { error: error.clone() });
+                                result = Err(AgentError::ExecutionFailed {
+                                    role: AgentRole::Judge,
+                                    message: error,
+                                });
+                                let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                                obs.record(pipeline_timer.finish(
+                                    obs.run_id,
+                                    None,
+                                    SpanKind::Pipeline { prompt: prompt.clone() },
+                                    pipeline_status,
+                                    Some(pipeline_tokens),
+                                ));
+                                obs.flush();
+                                return result;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                let scoper_input = serde_json::json!({
+                    "request_context": request_context,
+                    "effective_request": decision.effective_request,
+                })
+                .to_string();
+                break (
+                    judge_output,
+                    scoper_input,
+                    decision.effective_request,
+                    decision.ready_for_scoper && !decision.ready_for_planner,
+                );
+            }
+        };
+
+        // ── Stage 1: Scoping ──────────────────────────────────────────────
+        send!(PipelineEvent::StageStarted { role: AgentRole::Scoper });
+        let stage_timer = SpanTimer::start();
+        let mut scope_result = if should_run_scoper {
+            Some(scoper.execute(&scoper_input).await)
+        } else {
+            None
+        };
+        let scope_tokens = scope_result.as_ref().and_then(|r| r.as_ref().ok()).and_then(|o| o.tokens);
+        if let Some(t) = scope_tokens { pipeline_tokens.add(t); }
+        let scope_span_status = match &scope_result {
+            Some(Ok(o)) if o.success => SpanStatus::Ok,
+            Some(Ok(o)) => SpanStatus::Retried { reason: o.summary.clone() },
+            Some(Err(e)) => SpanStatus::Error { message: e.to_string() },
+            None => SpanStatus::Ok,
+        };
+        obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Scoper, attempt: 1 }, scope_span_status, scope_tokens));
+        let scoped = match scope_result {
+            Some(Err(e)) => {
+                maybe_send_network_error!(e, AgentRole::Scoper);
+                send!(PipelineEvent::PipelineFailed { error: e.to_string() });
+                result = Err(e);
+                let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                obs.record(pipeline_timer.finish(
+                    obs.run_id,
+                    None,
+                    SpanKind::Pipeline { prompt: prompt.clone() },
+                    pipeline_status,
+                    Some(pipeline_tokens),
+                ));
+                obs.flush();
+                return result;
+            }
+            Some(Ok(o)) if !o.success => {
+                send!(PipelineEvent::PipelineFailed { error: format!("Scoper failed: {}", o.summary) });
+                result = Err(AgentError::ExecutionFailed { role: AgentRole::Scoper, message: o.summary.clone() });
+                let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                obs.record(pipeline_timer.finish(
+                    obs.run_id,
+                    None,
+                    SpanKind::Pipeline { prompt: prompt.clone() },
+                    pipeline_status,
+                    Some(pipeline_tokens),
+                ));
+                obs.flush();
+                return result;
+            }
+            Some(Ok(o)) => o,
+            None => synthetic_scope(&request_context),
+        };
+        let scoped = if scoped.payload.get("needs_user_clarification").and_then(|value| value.as_bool()).unwrap_or(false) {
+            if let Some(callback) = clarification_callback.as_ref() {
+                let questions = payload_strings(&scoped.payload, "clarifying_questions");
+                send!(PipelineEvent::ClarificationRequested {
+                    source: AgentRole::Scoper,
+                    objective: scoped.payload.get("objective").and_then(|value| value.as_str()).unwrap_or(&effective_request_override).to_string(),
+                    questions: questions.clone(),
+                });
+                match callback(ClarificationRequest {
+                    source: AgentRole::Scoper,
+                    questions: questions.clone(),
+                    objective: scoped.payload.get("objective").and_then(|value| value.as_str()).unwrap_or(&effective_request_override).to_string(),
+                }).await {
+                    ClarificationResolution::Abort => {
+                        let error = "Pipeline aborted while waiting for scoper clarification".to_string();
+                        send!(PipelineEvent::PipelineFailed { error: error.clone() });
+                        result = Err(AgentError::ExecutionFailed { role: AgentRole::Scoper, message: error });
+                        let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                        obs.record(pipeline_timer.finish(
+                            obs.run_id,
+                            None,
+                            SpanKind::Pipeline { prompt: prompt.clone() },
+                            pipeline_status,
+                            Some(pipeline_tokens),
+                        ));
+                        obs.flush();
+                        return result;
+                    }
+                    ClarificationResolution::Answer(answer) => {
+                        request_context.apply_clarification("scoper", &questions, answer);
+                        scope_result = Some(scoper.execute(&serde_json::json!({
+                            "request_context": request_context,
+                            "effective_request": effective_request_override,
+                        }).to_string()).await);
+                        match scope_result {
+                            Some(Ok(output)) => output,
+                            Some(Err(e)) => {
+                                maybe_send_network_error!(e, AgentRole::Scoper);
+                                send!(PipelineEvent::PipelineFailed { error: e.to_string() });
+                                result = Err(e);
+                                let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                                obs.record(pipeline_timer.finish(
+                                    obs.run_id,
+                                    None,
+                                    SpanKind::Pipeline { prompt: prompt.clone() },
+                                    pipeline_status,
+                                    Some(pipeline_tokens),
+                                ));
+                                obs.flush();
+                                return result;
+                            }
+                            None => unreachable!(),
+                        }
+                    }
+                }
+            } else {
+                scoped
+            }
+        } else {
+            scoped
+        };
+        send!(PipelineEvent::StageCompleted { output: scoped.clone() });
+        send!(PipelineEvent::ScopeReady {
+            task_type: scoped.payload.get("task_type").and_then(|v| v.as_str()).unwrap_or("other").to_string(),
+            objective: scoped.payload.get("objective").and_then(|v| v.as_str()).unwrap_or(prompt.as_str()).to_string(),
+            in_scope: payload_strings(&scoped.payload, "in_scope"),
+            out_of_scope: payload_strings(&scoped.payload, "out_of_scope"),
+            unknowns: payload_strings(&scoped.payload, "unknowns"),
+            success_criteria: payload_strings(&scoped.payload, "success_criteria"),
+            relevant_files: payload_strings(&scoped.payload, "relevant_files"),
+            needs_user_clarification: scoped.payload.get("needs_user_clarification").and_then(|v| v.as_bool()).unwrap_or(false),
+            clarifying_questions: payload_strings(&scoped.payload, "clarifying_questions"),
+            confidence: scoped.payload.get("confidence").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
+        });
 
         loop {
             attempt += 1;
@@ -216,12 +602,11 @@ impl Controller {
             let coder_obs = obs.child(pipeline_span_id);
 
             // Construct agents.
-            let sensor_registry = Arc::new(crate::tools::ToolRegistry::with_sensors());
             let planner_guard   = Arc::new(self.guard_template.build_planner());
             let planner_obs     = obs.child(pipeline_span_id);
             let planner = LlmPlannerAgent {
                 llm:      Arc::clone(&self.llm),
-                registry: sensor_registry,
+                registry: Arc::clone(&sensor_registry),
                 guard:    planner_guard,
                 obs:      planner_obs,
             };
@@ -243,7 +628,13 @@ impl Controller {
             // ── Stage 1: Planning ────────────────────────────────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Planner });
             let stage_timer = SpanTimer::start();
-            let plan_result = planner.execute(&effective_prompt).await;
+            let planner_input = serde_json::json!({
+                "request_context": request_context,
+                "user_request": original_prompt,
+                    "effective_request": effective_prompt,
+                "problem_frame": scoped.payload,
+            }).to_string();
+            let plan_result = planner.execute(&planner_input).await;
             let plan_tokens = plan_result.as_ref().ok().and_then(|o| o.tokens);
             if let Some(t) = plan_tokens { pipeline_tokens.add(t); }
             let plan_span_status = match &plan_result {
@@ -292,7 +683,11 @@ impl Controller {
             // ── Stage 2: Coding with guardrails ──────────────────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Coder });
             let stage_timer = SpanTimer::start();
-            let context_for_coder = serde_json::to_string(&plan.payload)?;
+            let context_for_coder = serde_json::json!({
+                "request_context": request_context,
+                "problem_frame": scoped.payload,
+                "plan": plan.payload,
+            }).to_string();
             let code_result = coder.execute(&context_for_coder).await;
             let code_tokens = code_result.as_ref().ok().and_then(|o| o.tokens);
             if let Some(t) = code_tokens { pipeline_tokens.add(t); }
@@ -374,6 +769,9 @@ impl Controller {
             send!(PipelineEvent::StageStarted { role: AgentRole::Reviewer });
             let stage_timer = SpanTimer::start();
             let combined = serde_json::json!({
+                "request_context": request_context,
+                "scope": scoped.payload,
+                "plan": plan.payload,
                 "code_changes": code_output.payload,
                 "risk_assessment": risk_output.payload,
             });
@@ -405,7 +803,7 @@ impl Controller {
             send!(PipelineEvent::StageCompleted { output: review.clone() });
 
             info!(attempt, "Pipeline converged successfully");
-            result = Ok(vec![plan, code_output, risk_output, review]);
+            result = Ok(vec![judge_output.clone(), scoped.clone(), plan, code_output, risk_output, review]);
             break;
         }
 
@@ -417,7 +815,7 @@ impl Controller {
         obs.record(pipeline_timer.finish(
             obs.run_id,
             None,
-            SpanKind::Pipeline { prompt: prompt.to_string() },
+            SpanKind::Pipeline { prompt: prompt.clone() },
             pipeline_status,
             Some(pipeline_tokens),
         ));
@@ -455,10 +853,14 @@ mod tests {
                 .map(|m| m.content.as_str())
                 .unwrap_or("");
 
-            let content = if sys.contains("planning agent") {
+            let content = if sys.contains("request-judging agent") {
+                r#"{"route":"scoper","route_reason_code":"needs_repository_grounding","ask_user_clarification":false,"effective_request":"Add a hello world function","decision_factors":{"goal_is_concrete":true,"constraints_are_stable":true,"history_resolves_references":false,"repository_grounding_needed":true,"prior_scope_can_be_reused":false},"skip_scoper_criteria_met":[],"missing_information":[],"clarifying_questions":[],"confidence":"high"}"#
+            } else if sys.contains("planning agent") {
                 r#"{"steps":["Analyse codebase","Generate diff","Run tests"],"affected_files":["src/main.rs"],"success_criteria":"tests pass","complexity":"low"}"#
             } else if sys.contains("architect and security engineer") {
                 r#"{"risk_level":"low","reason":"no significant risk detected","affected_areas":[],"breaking_change":false,"security_implications":"","cr_focus":"standard code review"}"#
+            } else if sys.contains("problem-framing agent") {
+                r#"{"task_type":"feature","objective":"Add a hello world function","problem_statement":"Introduce a simple hello world function in the appropriate module","in_scope":["Rust source change"],"out_of_scope":["CLI redesign"],"constraints":[],"assumptions":[],"unknowns":[],"relevant_files":["src/main.rs"],"success_criteria":["A hello world function exists"],"needs_user_clarification":false,"clarifying_questions":[],"confidence":"high"}"#
             } else if sys.contains("expert software engineer") {
                 r#"{"diff":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-// TODO\n+// Done","files_changed":1,"explanation":"Replaced placeholder","language":"rust"}"#
             } else {
@@ -498,7 +900,7 @@ mod tests {
             .run("add a hello world function")
             .await
             .unwrap();
-        assert_eq!(outputs.len(), 4);
+        assert_eq!(outputs.len(), 6);
         assert!(outputs.iter().all(|o| o.success));
     }
 
@@ -507,6 +909,16 @@ mod tests {
         let llm: Arc<dyn LlmProvider> = Arc::new(MockLlmProvider);
         let guard = Arc::new(ExecutionGuard::default());
 
+        assert_eq!(JudgeAgent { llm: Arc::clone(&llm) }.llm.model_name(), "mock-model");
+        assert_eq!(
+            LlmScoperAgent {
+                llm:      Arc::clone(&llm),
+                registry: Arc::new(crate::tools::ToolRegistry::with_sensors()),
+                guard:    Arc::clone(&guard),
+                obs:      crate::observability::ObsCtx::noop(),
+            }.role(),
+            AgentRole::Scoper,
+        );
         assert_eq!(
             LlmPlannerAgent {
                 llm:      Arc::clone(&llm),
@@ -529,5 +941,34 @@ mod tests {
         );
         assert_eq!(LlmRiskAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Risk);
         assert_eq!(LlmReviewerAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Reviewer);
+    }
+
+    #[test]
+    fn request_context_detects_missing_history() {
+        let vague = RequestContext::from_prompt("优化一下登录流程");
+        assert!(!vague.has_meaningful_context());
+    }
+
+    #[test]
+    fn history_aware_requests_do_not_force_scoper() {
+        let request_context = RequestContext {
+            current_request: "继续按刚才的方案改".into(),
+            conversation_summary: Some("User already approved the earlier controller refactor.".into()),
+            recent_messages: vec![crate::controller::ConversationMessage {
+                role: crate::controller::ConversationRole::User,
+                content: "Use the same event contract as above".into(),
+            }],
+            session_state: crate::controller::SessionState {
+                execution_summary: Some("Planner produced a concrete event wiring plan".into()),
+                last_scope: None,
+                last_plan: None,
+                persistent_summary: Some("User already approved the controller refactor direction.".into()),
+                clarified_facts: vec!["Reuse the same event contract as above".into()],
+                known_relevant_files: vec!["apps/desktop/src-tauri/src/lib.rs".into()],
+                open_questions: Vec::new(),
+            },
+        };
+
+        assert!(request_context.has_meaningful_context());
     }
 }

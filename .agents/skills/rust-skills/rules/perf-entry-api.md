@@ -69,13 +69,13 @@ fn update_or_default(map: &mut HashMap<String, Config>, key: String, value: i32)
 
 ## Entry API Methods
 
-| Method | Behavior |
-|--------|----------|
-| `.or_insert(val)` | Insert `val` if empty |
-| `.or_insert_with(f)` | Insert `f()` if empty (lazy) |
-| `.or_default()` | Insert `Default::default()` if empty |
-| `.and_modify(f)` | Apply `f` if occupied |
-| `.or_insert_with_key(f)` | Insert `f(&key)` if empty |
+| Method                   | Behavior                             |
+| ------------------------ | ------------------------------------ |
+| `.or_insert(val)`        | Insert `val` if empty                |
+| `.or_insert_with(f)`     | Insert `f()` if empty (lazy)         |
+| `.or_default()`          | Insert `Default::default()` if empty |
+| `.and_modify(f)`         | Apply `f` if occupied                |
+| `.or_insert_with_key(f)` | Insert `f(&key)` if empty            |
 
 ## Pattern: Count Occurrences
 
@@ -121,11 +121,11 @@ match map.entry(key) {
 
 ## Performance
 
-| Pattern | Lookups | Hash Computations |
-|---------|---------|-------------------|
-| `contains_key` + `insert` | 2 | 2 |
-| `get` + `insert` | 2 | 2 |
-| `entry().or_insert()` | 1 | 1 |
+| Pattern                   | Lookups | Hash Computations |
+| ------------------------- | ------- | ----------------- |
+| `contains_key` + `insert` | 2       | 2                 |
+| `get` + `insert`          | 2       | 2                 |
+| `entry().or_insert()`     | 1       | 1                 |
 
 ## See Also
 

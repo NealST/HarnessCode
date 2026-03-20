@@ -88,22 +88,22 @@ for i in 0..rows {
 
 ## Comparison
 
-| Pattern | Bounds Checks | SIMD | Safety |
-|---------|---------------|------|--------|
-| `for i in 0..len { data[i] }` | Every access | Limited | Off-by-one risk |
-| `for x in &data` | None | Good | Safe |
-| `for x in data.iter()` | None | Good | Safe |
-| `data.iter().enumerate()` | None | Good | Safe |
+| Pattern                       | Bounds Checks | SIMD    | Safety          |
+| ----------------------------- | ------------- | ------- | --------------- |
+| `for i in 0..len { data[i] }` | Every access  | Limited | Off-by-one risk |
+| `for x in &data`              | None          | Good    | Safe            |
+| `for x in data.iter()`        | None          | Good    | Safe            |
+| `data.iter().enumerate()`     | None          | Good    | Safe            |
 
 ## Common Conversions
 
-| Index Pattern | Iterator Pattern |
-|---------------|------------------|
-| `for i in 0..v.len()` | `for x in &v` |
-| `v[0]` | `v.first()` |
-| `v[v.len()-1]` | `v.last()` |
-| `for i in 0..a.len() { a[i] + b[i] }` | `a.iter().zip(&b)` |
-| `for i in 0..v.len() { v[i] *= 2 }` | `for x in &mut v { *x *= 2 }` |
+| Index Pattern                         | Iterator Pattern              |
+| ------------------------------------- | ----------------------------- |
+| `for i in 0..v.len()`                 | `for x in &v`                 |
+| `v[0]`                                | `v.first()`                   |
+| `v[v.len()-1]`                        | `v.last()`                    |
+| `for i in 0..a.len() { a[i] + b[i] }` | `a.iter().zip(&b)`            |
+| `for i in 0..v.len() { v[i] *= 2 }`   | `for x in &mut v { *x *= 2 }` |
 
 ## Performance Note
 

@@ -11,15 +11,15 @@ interface DriftModalProps {
 }
 
 const KIND_LABEL: Record<DriftDetectedPayload["kind"], string> = {
-  scope:     "Scope Drift",
+  scope: "Scope Drift",
   direction: "Direction Drift",
-  both:      "Scope & Direction Drift",
+  both: "Scope & Direction Drift",
 };
 
 const KIND_DESC: Record<DriftDetectedPayload["kind"], string> = {
-  scope:     "The agent appears to be working outside the original goal.",
+  scope: "The agent appears to be working outside the original goal.",
   direction: "The agent appears to be moving away from the original goal.",
-  both:      "The agent has drifted in both scope and direction.",
+  both: "The agent has drifted in both scope and direction.",
 };
 
 export default function DriftModal({ payload, onClose }: DriftModalProps) {
@@ -31,7 +31,9 @@ export default function DriftModal({ payload, onClose }: DriftModalProps) {
     } catch (e) {
       console.error("submit_drift_decision failed:", e);
       // On failure, abort cleanly so the backend is never left waiting forever.
-      try { await invoke("submit_drift_decision", { decision: "stop" }); } catch {}
+      try {
+        await invoke("submit_drift_decision", { decision: "stop" });
+      } catch {}
       onClose();
     }
   };
@@ -56,7 +58,9 @@ export default function DriftModal({ payload, onClose }: DriftModalProps) {
           <p className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">
             Judge's assessment
           </p>
-          <p className="text-sm text-gray-200 leading-relaxed">{payload.reason}</p>
+          <p className="text-sm text-gray-200 leading-relaxed">
+            {payload.reason}
+          </p>
         </div>
 
         {/* Actions */}

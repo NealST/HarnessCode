@@ -90,7 +90,7 @@ struct AppConfig {
 async fn config_watcher(tx: watch::Sender<Arc<AppConfig>>) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
-        
+
         if let Ok(new_config) = reload_config_from_disk() {
             // Only notifies if value actually changed
             tx.send_if_modified(|current| {
@@ -174,13 +174,13 @@ let data = rx.borrow_and_update().clone();
 
 ## watch vs broadcast vs mpsc
 
-| Feature | watch | broadcast | mpsc |
-|---------|-------|-----------|------|
-| Receivers | Multiple | Multiple | Single |
-| Message delivery | Latest only | All messages | All messages |
-| Slow receiver | Skips to latest | Lags/misses | Backpressure |
-| Clone required | No | Yes | No |
-| Best for | Config, status | Events | Work queues |
+| Feature          | watch           | broadcast    | mpsc         |
+| ---------------- | --------------- | ------------ | ------------ |
+| Receivers        | Multiple        | Multiple     | Single       |
+| Message delivery | Latest only     | All messages | All messages |
+| Slow receiver    | Skips to latest | Lags/misses  | Backpressure |
+| Clone required   | No              | Yes          | No           |
+| Best for         | Config, status  | Events       | Work queues  |
 
 ## See Also
 

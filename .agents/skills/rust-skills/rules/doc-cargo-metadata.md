@@ -53,23 +53,23 @@ maintenance = { status = "actively-developed" }
 
 ## Required Fields for Publishing
 
-| Field | Purpose |
-|-------|---------|
-| `name` | Crate name on crates.io |
-| `version` | Semver version |
-| `license` or `license-file` | SPDX license identifier |
-| `description` | One-line summary (≤256 chars) |
+| Field                       | Purpose                       |
+| --------------------------- | ----------------------------- |
+| `name`                      | Crate name on crates.io       |
+| `version`                   | Semver version                |
+| `license` or `license-file` | SPDX license identifier       |
+| `description`               | One-line summary (≤256 chars) |
 
 ## Recommended Fields
 
-| Field | Purpose | Example |
-|-------|---------|---------|
-| `repository` | Link to source code | `https://github.com/user/repo` |
-| `documentation` | Link to docs | `https://docs.rs/crate` |
-| `readme` | Path to README | `README.md` |
-| `keywords` | Search terms (max 5) | `["http", "async"]` |
-| `categories` | crates.io categories | `["network-programming"]` |
-| `rust-version` | MSRV | `"1.70"` |
+| Field           | Purpose              | Example                        |
+| --------------- | -------------------- | ------------------------------ |
+| `repository`    | Link to source code  | `https://github.com/user/repo` |
+| `documentation` | Link to docs         | `https://docs.rs/crate`        |
+| `readme`        | Path to README       | `README.md`                    |
+| `keywords`      | Search terms (max 5) | `["http", "async"]`            |
+| `categories`    | crates.io categories | `["network-programming"]`      |
+| `rust-version`  | MSRV                 | `"1.70"`                       |
 
 ## Keywords Best Practices
 

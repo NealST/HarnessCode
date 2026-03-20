@@ -15,7 +15,7 @@ pub mod internal {
         pub buffer: Vec<u8>,    // Implementation detail exposed
         pub dirty: bool,
     }
-    
+
     pub fn process_internal(state: &mut InternalState) {
         // Users can call this, creating coupling
     }
@@ -35,7 +35,7 @@ pub(crate) mod internal {
         pub(crate) buffer: Vec<u8>,
         pub(crate) dirty: bool,
     }
-    
+
     pub(crate) fn process_internal(state: &mut InternalState) {
         // Only callable within crate
     }
@@ -54,7 +54,7 @@ impl Widget {
             }
         }
     }
-    
+
     pub fn do_something(&mut self) {
         internal::process_internal(&mut self.state);
     }
@@ -63,13 +63,13 @@ impl Widget {
 
 ## Visibility Levels
 
-| Visibility | Accessible From |
-|------------|-----------------|
-| `pub` | Everywhere |
-| `pub(crate)` | Current crate only |
-| `pub(super)` | Parent module only |
+| Visibility     | Accessible From      |
+| -------------- | -------------------- |
+| `pub`          | Everywhere           |
+| `pub(crate)`   | Current crate only   |
+| `pub(super)`   | Parent module only   |
 | `pub(in path)` | Specific module path |
-| (private) | Current module only |
+| (private)      | Current module only  |
 
 ## Pattern: Internal Module
 
@@ -126,11 +126,11 @@ pub use service::UserService;  // Only export the public API
 
 ## Benefits
 
-| Approach | API Stability | Flexibility |
-|----------|---------------|-------------|
-| All `pub` | Any change breaks users | None |
-| `pub(crate)` internals | Only `pub` items matter | Can refactor freely |
-| Private | Maximum encapsulation | Limits crate flexibility |
+| Approach               | API Stability           | Flexibility              |
+| ---------------------- | ----------------------- | ------------------------ |
+| All `pub`              | Any change breaks users | None                     |
+| `pub(crate)` internals | Only `pub` items matter | Can refactor freely      |
+| Private                | Maximum encapsulation   | Limits crate flexibility |
 
 ## See Also
 

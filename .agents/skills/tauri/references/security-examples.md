@@ -11,6 +11,7 @@
 **Description**: When using `dangerousRemoteDomainIpcAccess`, iFrames from the allowed domain could bypass origin checks and invoke Tauri API commands even though they should be restricted to the parent window only.
 
 **Vulnerable Configuration**:
+
 ```json
 {
   "security": {
@@ -27,6 +28,7 @@
 ```
 
 **Mitigation**:
+
 1. Upgrade to Tauri 1.6.7+ or 2.0.0-beta.20+
 2. Avoid `dangerousRemoteDomainIpcAccess` if possible
 3. Implement additional origin checks in commands
@@ -54,26 +56,29 @@ async fn sensitive_op(window: Window) -> Result<(), String> {
 **Description**: The Tauri documentation example showed `envPrefix: ['VITE_', 'TAURI_']` which causes `TAURI_PRIVATE_KEY` and `TAURI_KEY_PASSWORD` to be bundled into the frontend code.
 
 **Vulnerable Configuration**:
+
 ```typescript
 // vite.config.ts - VULNERABLE
-import { defineConfig } from 'vite';
+import { defineConfig } from "vite";
 
 export default defineConfig({
-  envPrefix: ['VITE_', 'TAURI_']  // Leaks TAURI_PRIVATE_KEY!
+  envPrefix: ["VITE_", "TAURI_"], // Leaks TAURI_PRIVATE_KEY!
 });
 ```
 
 **Mitigation**:
+
 ```typescript
 // vite.config.ts - SECURE
-import { defineConfig } from 'vite';
+import { defineConfig } from "vite";
 
 export default defineConfig({
-  envPrefix: ['VITE_']  // Only expose VITE_ variables
+  envPrefix: ["VITE_"], // Only expose VITE_ variables
 });
 ```
 
 **Detection**:
+
 ```bash
 # Check if keys are in bundle
 grep -r "TAURI_PRIVATE_KEY\|TAURI_KEY_PASSWORD" dist/
@@ -90,15 +95,17 @@ grep -r "TAURI_PRIVATE_KEY\|TAURI_KEY_PASSWORD" dist/
 **Description**: Regression in Tauri 1.4.0 allowed access to dotfiles when using wildcard scopes like `$HOME/*`. Previously dotfiles were not implicitly allowed.
 
 **Vulnerable Scope**:
+
 ```json
 {
   "fs": {
-    "scope": ["$HOME/*"]  // In 1.4.0, this allowed access to ~/.ssh/*
+    "scope": ["$HOME/*"] // In 1.4.0, this allowed access to ~/.ssh/*
   }
 }
 ```
 
 **Mitigation**:
+
 1. Upgrade to Tauri 1.4.1+
 2. Use explicit path allowlists instead of wildcards
 
@@ -108,12 +115,9 @@ grep -r "TAURI_PRIVATE_KEY\|TAURI_KEY_PASSWORD" dist/
   "permissions": [
     {
       "identifier": "fs:read-files",
-      "allow": [
-        "$HOME/Documents/*",
-        "$HOME/Downloads/*"
-      ],
+      "allow": ["$HOME/Documents/*", "$HOME/Downloads/*"],
       "deny": [
-        "$HOME/.*"  // Explicitly deny dotfiles
+        "$HOME/.*" // Explicitly deny dotfiles
       ]
     }
   ]
@@ -236,7 +240,7 @@ let client = reqwest::Client::builder()
     }
   },
   "build": {
-    "devtools": false  // Disable in production
+    "devtools": false // Disable in production
   }
 }
 ```

@@ -80,16 +80,16 @@ impl Foo {
 
 ## Notable Lints in This Group
 
-| Lint | Better Pattern |
-|------|---------------|
-| `len_zero` | Use `is_empty()` instead of `len() == 0` |
-| `redundant_field_names` | Use shorthand `{ x }` not `{ x: x }` |
-| `unused_unit` | Remove `-> ()` and trailing `()` |
-| `collapsible_if` | Combine nested ifs with `&&` |
-| `single_match` | Use `if let` instead |
-| `match_like_matches_macro` | Use `matches!()` macro |
-| `needless_return` | Remove explicit `return` at end |
-| `question_mark` | Use `?` instead of `match` |
+| Lint                       | Better Pattern                           |
+| -------------------------- | ---------------------------------------- |
+| `len_zero`                 | Use `is_empty()` instead of `len() == 0` |
+| `redundant_field_names`    | Use shorthand `{ x }` not `{ x: x }`     |
+| `unused_unit`              | Remove `-> ()` and trailing `()`         |
+| `collapsible_if`           | Combine nested ifs with `&&`             |
+| `single_match`             | Use `if let` instead                     |
+| `match_like_matches_macro` | Use `matches!()` macro                   |
+| `needless_return`          | Remove explicit `return` at end          |
+| `question_mark`            | Use `?` instead of `match`               |
 
 ## Examples
 

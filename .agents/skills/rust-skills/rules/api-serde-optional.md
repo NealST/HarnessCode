@@ -80,7 +80,7 @@ pub struct Point {
 
 ## Feature Documentation
 
-```rust
+````rust
 // lib.rs
 
 //! # Features
@@ -97,7 +97,7 @@ pub struct Point {
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// A configuration type.
-/// 
+///
 /// When the `serde` feature is enabled, this type implements
 /// `Serialize` and `Deserialize`.
 #[derive(Debug, Clone)]
@@ -106,7 +106,7 @@ pub struct Point {
 pub struct Config {
     pub name: String,
 }
-```
+````
 
 ## Multiple Optional Dependencies
 

@@ -7,7 +7,12 @@ import PipelineRunView, {
 } from "@/components/PipelineRunView";
 import RunHistoryPanel from "@/components/RunHistoryPanel";
 import DriftModal, { type DriftDetectedPayload } from "@/components/DriftModal";
+import ClarificationModal, {
+  type ClarificationPayload,
+} from "@/components/ClarificationModal";
 import SettingsPanel from "@/components/SettingsPanel";
+
+const SESSION_DIGEST_STORAGE_KEY = "harnesscode.sessionDigest.v1";
 
 // ──────────────────────────────────────────────
 // Chat message model
@@ -20,6 +25,155 @@ interface ChatMessage {
   /** Set while streaming; removed when done */
   pipelineEvents?: PipelineEventDto[];
   pipelineDone?: PipelineDoneEvent;
+}
+
+type ScopeReadyEvent = Extract<PipelineEventDto, { type: "scope_ready" }>;
+type PlanReadyEvent = Extract<PipelineEventDto, { type: "plan_ready" }>;
+
+interface RequestConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface SessionStatePayload {
+  execution_summary: string | null;
+  last_scope: ScopeReadyEvent | null;
+  last_plan: PlanReadyEvent | null;
+  persistent_summary: string | null;
+  clarified_facts: string[];
+  known_relevant_files: string[];
+  open_questions: string[];
+}
+
+interface RequestContextPayload {
+  current_request: string;
+  conversation_summary: string | null;
+  recent_messages: RequestConversationMessage[];
+  session_state: SessionStatePayload;
+}
+
+interface SessionDigest {
+  persistentSummary: string | null;
+  clarifiedFacts: string[];
+  effectiveRequests: string[];
+}
+
+function emptySessionDigest(): SessionDigest {
+  return {
+    persistentSummary: null,
+    clarifiedFacts: [],
+    effectiveRequests: [],
+  };
+}
+
+function loadSessionDigest(): SessionDigest {
+  if (typeof window === "undefined") return emptySessionDigest();
+  try {
+    const raw = window.localStorage.getItem(SESSION_DIGEST_STORAGE_KEY);
+    if (!raw) return emptySessionDigest();
+    const parsed = JSON.parse(raw) as Partial<SessionDigest>;
+    return {
+      persistentSummary: parsed.persistentSummary ?? null,
+      clarifiedFacts: parsed.clarifiedFacts ?? [],
+      effectiveRequests: parsed.effectiveRequests ?? [],
+    };
+  } catch {
+    return emptySessionDigest();
+  }
+}
+
+function summariseDigest(digest: SessionDigest): string | null {
+  const parts = [
+    ...(digest.persistentSummary ? [digest.persistentSummary] : []),
+    ...digest.clarifiedFacts.slice(-3),
+    ...(digest.effectiveRequests.length
+      ? [
+          `Recent effective requests: ${digest.effectiveRequests
+            .slice(-2)
+            .join(" | ")}`,
+        ]
+      : []),
+  ].filter(Boolean);
+
+  return parts.length ? parts.join("\n") : null;
+}
+
+function compactText(value: string, max = 220): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) return normalized;
+  return normalized.slice(0, max - 1) + "…";
+}
+
+function buildRequestContext(
+  messages: ChatMessage[],
+  currentRequest: string,
+  digest: SessionDigest,
+): RequestContextPayload {
+  let lastScope: ScopeReadyEvent | null = null;
+  let lastPlan: PlanReadyEvent | null = null;
+
+  for (const message of messages) {
+    for (const event of message.pipelineEvents ?? []) {
+      if (event.type === "scope_ready") {
+        lastScope = event;
+      } else if (event.type === "plan_ready") {
+        lastPlan = event;
+      }
+    }
+  }
+
+  const recentMessages = messages
+    .filter((message) => message.id !== "welcome" && message.content.trim())
+    .slice(-6)
+    .map<RequestConversationMessage>((message) => ({
+      role: message.type === "user" ? "user" : "assistant",
+      content: compactText(message.content),
+    }));
+
+  const conversationSummary = recentMessages.length
+    ? recentMessages
+        .map((message) =>
+          `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`,
+        )
+        .join("\n")
+    : null;
+
+  const executionSummaryParts: string[] = [];
+  if (lastScope) {
+    executionSummaryParts.push(`Last scoped objective: ${lastScope.objective}`);
+  }
+  if (lastPlan?.steps.length) {
+    executionSummaryParts.push(
+      `Last plan steps: ${lastPlan.steps.slice(0, 3).join("; ")}`,
+    );
+  }
+
+  const knownRelevantFiles = Array.from(
+    new Set([
+      ...(lastScope?.relevant_files ?? []),
+      ...(lastPlan?.affected_files ?? []),
+    ]),
+  );
+
+  return {
+    current_request: currentRequest,
+    conversation_summary: conversationSummary,
+    recent_messages: recentMessages,
+    session_state: {
+      execution_summary: executionSummaryParts.length
+        ? executionSummaryParts.join("\n")
+        : null,
+      last_scope: lastScope,
+      last_plan: lastPlan,
+      persistent_summary: summariseDigest(digest),
+      clarified_facts: digest.clarifiedFacts,
+      known_relevant_files: knownRelevantFiles,
+      open_questions:
+        lastScope?.needs_user_clarification && lastScope.clarifying_questions.length
+          ? lastScope.clarifying_questions
+          : [],
+    },
+  };
 }
 
 // ──────────────────────────────────────────────
@@ -38,7 +192,14 @@ export default function App() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [historyKey, setHistoryKey] = useState(0);
-  const [driftPayload, setDriftPayload] = useState<DriftDetectedPayload | null>(null);
+  const [driftPayload, setDriftPayload] = useState<DriftDetectedPayload | null>(
+    null,
+  );
+  const [clarificationPayload, setClarificationPayload] =
+    useState<ClarificationPayload | null>(null);
+  const [sessionDigest, setSessionDigest] = useState<SessionDigest>(() =>
+    loadSessionDigest(),
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const unlistenRef = useRef<UnlistenFn[]>([]);
@@ -55,6 +216,14 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      SESSION_DIGEST_STORAGE_KEY,
+      JSON.stringify(sessionDigest),
+    );
+  }, [sessionDigest]);
+
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -63,6 +232,7 @@ export default function App() {
 
       const userMsgId = crypto.randomUUID();
       const agentMsgId = crypto.randomUUID();
+      const requestContext = buildRequestContext(messages, prompt, sessionDigest);
 
       setMessages((prev) => [
         ...prev,
@@ -81,8 +251,8 @@ export default function App() {
           prev.map((m) =>
             m.id === agentMsgId
               ? { ...m, pipelineEvents: [...(m.pipelineEvents ?? []), ev] }
-              : m
-          )
+              : m,
+          ),
         );
       };
 
@@ -91,6 +261,20 @@ export default function App() {
         if (ev.type === "drift_detected") {
           // Show the drift modal; don't add it to the pipeline event stream.
           setDriftPayload(ev as unknown as DriftDetectedPayload);
+        } else if (ev.type === "judge_ready") {
+          setSessionDigest((prev) => ({
+            ...prev,
+            effectiveRequests: Array.from(
+              new Set([...prev.effectiveRequests, ev.effective_request]),
+            ).slice(-8),
+          }));
+          appendEvent(ev);
+        } else if (ev.type === "clarification_requested") {
+          setClarificationPayload({
+            source: ev.source,
+            objective: ev.objective,
+            questions: ev.questions,
+          });
         } else {
           appendEvent(ev);
         }
@@ -109,8 +293,8 @@ export default function App() {
                       ? `Pipeline completed — ${done.stages.length} stages passed.`
                       : `Pipeline failed: ${done.message}`,
                 }
-              : m
-          )
+              : m,
+          ),
         );
         // Refresh history sidebar after run completes
         setHistoryKey((k) => k + 1);
@@ -123,7 +307,11 @@ export default function App() {
       unlistenRef.current = [ul1, ul2];
 
       try {
-        await invoke("start_pipeline", { prompt, projectDir: null });
+        await invoke("start_pipeline", {
+          prompt,
+          projectDir: null,
+          requestContext,
+        });
       } catch (err) {
         setMessages((prev) =>
           prev.map((m) =>
@@ -134,13 +322,13 @@ export default function App() {
                   pipelineDone: { status: "err", message: String(err) },
                   content: `Failed to start pipeline: ${err}`,
                 }
-              : m
-          )
+              : m,
+          ),
         );
         setLoading(false);
       }
     },
-    [input, loading]
+    [input, loading, messages, sessionDigest],
   );
 
   return (
@@ -155,6 +343,34 @@ export default function App() {
         <DriftModal
           payload={driftPayload}
           onClose={() => setDriftPayload(null)}
+        />
+      )}
+      {clarificationPayload && (
+        <ClarificationModal
+          payload={clarificationPayload}
+          onSubmitted={(answer) => {
+            if (!answer?.trim()) return;
+            setSessionDigest((prev) => {
+              const fact = `${clarificationPayload.source}: ${clarificationPayload.questions.join(" | ")} => ${answer.trim()}`;
+              const clarifiedFacts = Array.from(
+                new Set([...prev.clarifiedFacts, fact]),
+              ).slice(-12);
+              const persistentSummary = [
+                prev.persistentSummary,
+                `Clarified objective: ${clarificationPayload.objective}`,
+                answer.trim(),
+              ]
+                .filter(Boolean)
+                .join("\n");
+
+              return {
+                ...prev,
+                persistentSummary,
+                clarifiedFacts,
+              };
+            });
+          }}
+          onClose={() => setClarificationPayload(null)}
         />
       )}
       {/* ── Header ── */}
@@ -242,8 +458,8 @@ export default function App() {
                             prev.map((m) =>
                               m.id === msg.id
                                 ? { ...m, pipelineEvents: undefined }
-                                : m
-                            )
+                                : m,
+                            ),
                           )
                         }
                       />

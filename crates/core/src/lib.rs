@@ -8,7 +8,7 @@
 //! | Module | Responsibility |
 //! |--------|---------------|
 //! | [`agents`] | Agent trait, concrete agent implementations (Planner, Coder, Risk, Reviewer) |
-//! | [`controller`] | Cybernetic [`Controller`](controller::Controller), guardrails, pipeline events |
+//! | [`controller`] | Cybernetic [`Controller`](controller::Controller), request context, guardrails, pipeline events |
 //! | [`observability`] | Span types, [`SpanSink`](observability::SpanSink) trait, [`TerminalSink`](observability::TerminalSink), [`JsonLinesSink`](observability::JsonLinesSink) |
 //! | [`context`] | Helpers for generating and parsing `agents.md` / `Claude.md` context files |
 //! | [`llm`] | LLM provider trait and vendor adapters |

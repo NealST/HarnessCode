@@ -8,24 +8,29 @@
 //! | Module     | Role |
 //! |------------|------|
 //! | [`planner`] | Decomposes the user's goal into an ordered execution plan |
+//! | [`judge`] | Decides whether the request needs clarification, scoping, or direct planning |
 //! | [`coder`]   | Implements the plan using file tools; produces a diff summary |
 //! | [`risk`]    | Assesses the diff for semantic risk and security implications |
 //! | [`reviewer`]| Validates correctness and decides pass/fail |
 
 pub mod coder;
 pub mod drift_judge;
+pub mod judge;
 pub mod planner;
 pub mod reviewer;
 pub mod risk;
+pub mod scoper;
 
 pub use coder::LlmCoderAgent;
 pub use drift_judge::{
     DriftCallback, DriftConfig, DriftDecision, DriftJudgeAgent, DriftKind, DriftParams,
     DriftSignal, TurnSummary,
 };
+pub use judge::{JudgeAgent, JudgeDecision};
 pub use planner::LlmPlannerAgent;
 pub use reviewer::LlmReviewerAgent;
 pub use risk::LlmRiskAgent;
+pub use scoper::LlmScoperAgent;
 
 use crate::llm::LlmProvider;
 use crate::observability::TokenUsage;
@@ -74,6 +79,10 @@ pub enum AgentError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentRole {
+    /// Judges request completeness and decides the next orchestration path.
+    Judge,
+    /// Frames the user's request into a concrete, bounded problem statement.
+    Scoper,
     /// Breaks the user's goal into discrete, verifiable steps.
     Planner,
     /// Writes and applies code changes inside the sandbox.
@@ -87,6 +96,8 @@ pub enum AgentRole {
 impl fmt::Display for AgentRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            AgentRole::Judge => write!(f, "Judge"),
+            AgentRole::Scoper => write!(f, "Scoper"),
             AgentRole::Planner => write!(f, "Planner"),
             AgentRole::Coder => write!(f, "Coder"),
             AgentRole::Risk => write!(f, "Risk"),

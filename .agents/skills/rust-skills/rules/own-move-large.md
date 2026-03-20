@@ -53,13 +53,13 @@ fn process_large(state: Box<LargeStruct>) -> Box<LargeStruct> {
 
 ## When to Box
 
-| Type Size | Move Frequency | Recommendation |
-|-----------|----------------|----------------|
-| < 128 bytes | Any | Don't box |
-| 128-512 bytes | Rare | Probably don't box |
-| 128-512 bytes | Frequent | Consider boxing |
-| > 512 bytes | Any | Box or use references |
-| > 4KB | Any | Definitely box |
+| Type Size     | Move Frequency | Recommendation        |
+| ------------- | -------------- | --------------------- |
+| < 128 bytes   | Any            | Don't box             |
+| 128-512 bytes | Rare           | Probably don't box    |
+| 128-512 bytes | Frequent       | Consider boxing       |
+| > 512 bytes   | Any            | Box or use references |
+| > 4KB         | Any            | Definitely box        |
 
 ## Stack vs Heap Tradeoffs
 

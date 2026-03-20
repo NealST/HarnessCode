@@ -100,12 +100,12 @@ assert_eq!(size_of::<ecow::EcoString>(), 16);  // Even smaller!
 
 ## Inline Capacity
 
-| Type | Size | Inline Capacity |
-|------|------|-----------------|
-| `String` | 24 | 0 (always heap) |
-| `CompactString` | 24 | 24 bytes |
-| `SmartString<LazyCompact>` | 24 | 23 bytes |
-| `EcoString` | 16 | 15 bytes |
+| Type                       | Size | Inline Capacity |
+| -------------------------- | ---- | --------------- |
+| `String`                   | 24   | 0 (always heap) |
+| `CompactString`            | 24   | 24 bytes        |
+| `SmartString<LazyCompact>` | 24   | 23 bytes        |
+| `EcoString`                | 16   | 15 bytes        |
 
 ## When to Use
 

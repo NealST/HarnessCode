@@ -82,12 +82,12 @@ fn interleave(data: &mut [i32]) {
 
 ## Performance Comparison
 
-| Pattern | Bounds Checks | SIMD Potential | Clarity |
-|---------|---------------|----------------|---------|
-| `for i in 0..len` | Every access | Limited | Medium |
-| `for &x in slice` | None | High | High |
-| `.iter().enumerate()` | None | Medium | High |
-| `get_unchecked` | None (unsafe) | High | Low |
+| Pattern               | Bounds Checks | SIMD Potential | Clarity |
+| --------------------- | ------------- | -------------- | ------- |
+| `for i in 0..len`     | Every access  | Limited        | Medium  |
+| `for &x in slice`     | None          | High           | High    |
+| `.iter().enumerate()` | None          | Medium         | High    |
+| `get_unchecked`       | None (unsafe) | High           | Low     |
 
 ## Iterator Advantages
 

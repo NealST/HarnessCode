@@ -30,7 +30,7 @@ pub enum Status {
 
 ## Good
 
-```rust
+````rust
 /// Configuration for establishing a connection to the service.
 ///
 /// # Examples
@@ -48,10 +48,10 @@ pub enum Status {
 pub struct Config {
     /// Maximum time to wait for a response before timing out.
     pub timeout: Duration,
-    
+
     /// Number of retry attempts for failed requests.
     pub retries: u32,
-    
+
     /// Base URL for all API requests.
     pub base_url: String,
 }
@@ -75,21 +75,21 @@ pub enum Status {
     /// Job has failed and will not be retried.
     Failed,
 }
-```
+````
 
 ## What to Document
 
-| Item Type | Required Content |
-|-----------|------------------|
-| Structs | Purpose, usage example |
-| Struct fields | What the field represents |
-| Enums | When to use each variant |
-| Enum variants | What state it represents |
-| Functions | What it does, parameters, return value |
-| Traits | Contract and expected behavior |
-| Trait methods | Default implementation behavior |
-| Type aliases | Why the alias exists |
-| Constants | What the value represents |
+| Item Type     | Required Content                       |
+| ------------- | -------------------------------------- |
+| Structs       | Purpose, usage example                 |
+| Struct fields | What the field represents              |
+| Enums         | When to use each variant               |
+| Enum variants | What state it represents               |
+| Functions     | What it does, parameters, return value |
+| Traits        | Contract and expected behavior         |
+| Trait methods | Default implementation behavior        |
+| Type aliases  | Why the alias exists                   |
+| Constants     | What the value represents              |
 
 ## Enforcement
 

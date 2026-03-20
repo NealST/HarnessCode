@@ -22,6 +22,7 @@ Comprehensive guide for writing high-quality, idiomatic, and highly optimized Ru
 ## When to Apply
 
 Reference these guidelines when:
+
 - Writing new Rust functions, structs, or modules
 - Implementing error handling or async code
 - Designing public APIs for libraries
@@ -32,22 +33,22 @@ Reference these guidelines when:
 
 ## Rule Categories by Priority
 
-| Priority | Category | Impact | Prefix | Rules |
-|----------|----------|--------|--------|-------|
-| 1 | Ownership & Borrowing | CRITICAL | `own-` | 12 |
-| 2 | Error Handling | CRITICAL | `err-` | 12 |
-| 3 | Memory Optimization | CRITICAL | `mem-` | 15 |
-| 4 | API Design | HIGH | `api-` | 15 |
-| 5 | Async/Await | HIGH | `async-` | 15 |
-| 6 | Compiler Optimization | HIGH | `opt-` | 12 |
-| 7 | Naming Conventions | MEDIUM | `name-` | 16 |
-| 8 | Type Safety | MEDIUM | `type-` | 10 |
-| 9 | Testing | MEDIUM | `test-` | 13 |
-| 10 | Documentation | MEDIUM | `doc-` | 11 |
-| 11 | Performance Patterns | MEDIUM | `perf-` | 11 |
-| 12 | Project Structure | LOW | `proj-` | 11 |
-| 13 | Clippy & Linting | LOW | `lint-` | 11 |
-| 14 | Anti-patterns | REFERENCE | `anti-` | 15 |
+| Priority | Category              | Impact    | Prefix   | Rules |
+| -------- | --------------------- | --------- | -------- | ----- |
+| 1        | Ownership & Borrowing | CRITICAL  | `own-`   | 12    |
+| 2        | Error Handling        | CRITICAL  | `err-`   | 12    |
+| 3        | Memory Optimization   | CRITICAL  | `mem-`   | 15    |
+| 4        | API Design            | HIGH      | `api-`   | 15    |
+| 5        | Async/Await           | HIGH      | `async-` | 15    |
+| 6        | Compiler Optimization | HIGH      | `opt-`   | 12    |
+| 7        | Naming Conventions    | MEDIUM    | `name-`  | 16    |
+| 8        | Type Safety           | MEDIUM    | `type-`  | 10    |
+| 9        | Testing               | MEDIUM    | `test-`  | 13    |
+| 10       | Documentation         | MEDIUM    | `doc-`   | 11    |
+| 11       | Performance Patterns  | MEDIUM    | `perf-`  | 11    |
+| 12       | Project Structure     | LOW       | `proj-`  | 11    |
+| 13       | Clippy & Linting      | LOW       | `lint-`  | 11    |
+| 14       | Anti-patterns         | REFERENCE | `anti-`  | 15    |
 
 ---
 
@@ -94,7 +95,7 @@ Reference these guidelines when:
 - [`mem-clone-from`](rules/mem-clone-from.md) - Use `clone_from()` to reuse allocations
 - [`mem-reuse-collections`](rules/mem-reuse-collections.md) - Reuse collections with `clear()` in loops
 - [`mem-avoid-format`](rules/mem-avoid-format.md) - Avoid `format!()` when string literals work
-- [`mem-write-over-format`](rules/mem-write-over-format.md) - Use `write!()` instead of `format!()` 
+- [`mem-write-over-format`](rules/mem-write-over-format.md) - Use `write!()` instead of `format!()`
 - [`mem-arena-allocator`](rules/mem-arena-allocator.md) - Use arena allocators for batch allocations
 - [`mem-zero-copy`](rules/mem-zero-copy.md) - Use zero-copy patterns with slices and `Bytes`
 - [`mem-compact-string`](rules/mem-compact-string.md) - Use `CompactString` for small string optimization
@@ -312,21 +313,22 @@ This skill provides rule identifiers for quick reference. When generating or rev
 
 ### Rule Application by Task
 
-| Task | Primary Categories |
-|------|-------------------|
-| New function | `own-`, `err-`, `name-` |
-| New struct/API | `api-`, `type-`, `doc-` |
-| Async code | `async-`, `own-` |
-| Error handling | `err-`, `api-` |
+| Task                | Primary Categories      |
+| ------------------- | ----------------------- |
+| New function        | `own-`, `err-`, `name-` |
+| New struct/API      | `api-`, `type-`, `doc-` |
+| Async code          | `async-`, `own-`        |
+| Error handling      | `err-`, `api-`          |
 | Memory optimization | `mem-`, `own-`, `perf-` |
-| Performance tuning | `opt-`, `mem-`, `perf-` |
-| Code review | `anti-`, `lint-` |
+| Performance tuning  | `opt-`, `mem-`, `perf-` |
+| Code review         | `anti-`, `lint-`        |
 
 ---
 
 ## Sources
 
 This skill synthesizes best practices from:
+
 - [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
 - [Rust Performance Book](https://nnethercote.github.io/perf-book/)
 - [Rust Design Patterns](https://rust-unofficial.github.io/patterns/)

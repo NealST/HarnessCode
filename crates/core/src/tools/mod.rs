@@ -89,7 +89,7 @@ pub trait Tool: Send + Sync {
 
 /// A runtime registry of all tools available to agents.
 ///
-/// Constructed once per [`Controller`](crate::multi_agent::Controller) run.
+/// Constructed once per [`Controller`](crate::controller::Controller) run.
 /// Provides `defs()` for the LLM to select from, and `dispatch()` to execute.
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
@@ -115,8 +115,9 @@ impl ToolRegistry {
 
     /// Create a registry with read-only sensor tools only (no actuators).
     ///
-    /// Used by the Planner agent to safely explore the codebase before writing
-    /// a grounded execution plan.  Write and shell-execution tools are excluded.
+    /// Used by the Scoper and Planner agents to safely explore the codebase
+    /// before framing the task or writing a grounded execution plan.
+    /// Write and shell-execution tools are excluded.
     pub fn with_sensors() -> Self {
         let mut r = Self::empty();
         r.register(ReadFileTool);

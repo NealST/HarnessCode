@@ -60,14 +60,14 @@ assert_eq!(size_of::<Option<ThinVec<u8>>>(), 8);  // Option is free!
 
 ## ThinVec vs Vec
 
-| Feature | `Vec<T>` | `ThinVec<T>` |
-|---------|----------|--------------|
-| Size (empty) | 24 bytes | 8 bytes |
-| Size (non-empty) | 24 bytes | 8 bytes (header on heap) |
-| Option<T> optimization | No | Yes |
-| Cache locality | Better (len/cap on stack) | Worse (len/cap on heap) |
-| Iteration speed | Faster | Slightly slower |
-| API compatibility | Full | Vec-like |
+| Feature                | `Vec<T>`                  | `ThinVec<T>`             |
+| ---------------------- | ------------------------- | ------------------------ |
+| Size (empty)           | 24 bytes                  | 8 bytes                  |
+| Size (non-empty)       | 24 bytes                  | 8 bytes (header on heap) |
+| Option<T> optimization | No                        | Yes                      |
+| Cache locality         | Better (len/cap on stack) | Worse (len/cap on heap)  |
+| Iteration speed        | Faster                    | Slightly slower          |
+| API compatibility      | Full                      | Vec-like                 |
 
 ## When to Use ThinVec
 

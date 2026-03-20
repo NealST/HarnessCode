@@ -47,11 +47,11 @@ lto = "off"
 
 ## Trade-offs
 
-| Setting | Compile Time | Binary Size | Performance |
-|---------|--------------|-------------|-------------|
-| `lto = false` | Fast | Larger | Baseline |
-| `lto = "thin"` | Medium | Smaller | +5-15% |
-| `lto = "fat"` | Slow | Smallest | +10-20% |
+| Setting        | Compile Time | Binary Size | Performance |
+| -------------- | ------------ | ----------- | ----------- |
+| `lto = false`  | Fast         | Larger      | Baseline    |
+| `lto = "thin"` | Medium       | Smaller     | +5-15%      |
+| `lto = "fat"`  | Slow         | Smallest    | +10-20%     |
 
 ## Evidence from Production
 
@@ -100,12 +100,12 @@ opt-level = 3        # Optimize dependencies even in dev
 
 ## When to Use Each
 
-| Situation | LTO Setting |
-|-----------|-------------|
-| Development | `false` (fast compiles) |
-| CI builds | `"thin"` (balance) |
-| Release binaries | `"fat"` (max perf) |
-| Libraries (crates.io) | `false` (users choose) |
+| Situation             | LTO Setting             |
+| --------------------- | ----------------------- |
+| Development           | `false` (fast compiles) |
+| CI builds             | `"thin"` (balance)      |
+| Release binaries      | `"fat"` (max perf)      |
+| Libraries (crates.io) | `false` (users choose)  |
 
 ## Measuring Impact
 

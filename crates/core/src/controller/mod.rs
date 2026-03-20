@@ -1,7 +1,7 @@
 //! # Controller Layer
 //!
 //! The Controller is the "safety harness" above the individual agents.
-//! It orchestrates the Planner → Coder → Risk → Reviewer pipeline, enforces
+//! It orchestrates the Judge → Scoper → Planner → Coder → Risk → Reviewer pipeline, enforces
 //! retry limits, constructs fresh [`ExecutionGuard`] instances per attempt, and
 //! streams real-time [`PipelineEvent`]s to callers.
 //!
@@ -18,8 +18,14 @@
 pub mod controller;
 pub mod events;
 pub mod guardrails;
+pub mod interaction;
+pub mod request_context;
 pub mod tool_loop;
 
 pub use controller::Controller;
 pub use events::PipelineEvent;
 pub use guardrails::{ExecutionGuard, GuardrailViolation, StepStatus};
+pub use interaction::{ClarificationCallback, ClarificationRequest, ClarificationResolution};
+pub use request_context::{
+	ConversationMessage, ConversationRole, RequestContext, SessionState,
+};

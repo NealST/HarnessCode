@@ -128,22 +128,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install LLVM tools
         run: sudo apt-get install llvm
-      
+
       - name: Instrumented build
         run: RUSTFLAGS="-Cprofile-generate=/tmp/pgo" cargo build --release
-      
+
       - name: Run profiling workloads
         run: ./scripts/run_profiling_workloads.sh
-      
+
       - name: Merge profiles
         run: llvm-profdata merge -o /tmp/pgo/merged.profdata /tmp/pgo
-      
+
       - name: Optimized build
         run: RUSTFLAGS="-Cprofile-use=/tmp/pgo/merged.profdata" cargo build --release
-      
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -153,12 +153,12 @@ jobs:
 
 ## When to Use PGO
 
-| Use PGO | Skip PGO |
-|---------|----------|
-| Production deployments | Development builds |
+| Use PGO                   | Skip PGO                  |
+| ------------------------- | ------------------------- |
+| Production deployments    | Development builds        |
 | Performance-critical apps | Libraries (users can PGO) |
-| Stable workload patterns | Highly variable workloads |
-| Sufficient profiling data | Quick iteration cycles |
+| Stable workload patterns  | Highly variable workloads |
+| Sufficient profiling data | Quick iteration cycles    |
 
 ## See Also
 

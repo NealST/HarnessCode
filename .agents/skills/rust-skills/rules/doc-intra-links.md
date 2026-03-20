@@ -10,7 +10,7 @@ Intra-doc links (`[TypeName]`, `[method](Self::method)`) create clickable refere
 
 ```rust
 /// Returns the length of the buffer.
-/// 
+///
 /// See also `capacity()` for the allocated size, and the
 /// `Buffer` struct for more details.
 pub fn len(&self) -> usize {
@@ -28,7 +28,7 @@ pub fn parse<T: FromStr>(input: &str) -> Result<T, Error> {
 
 ```rust
 /// Returns the length of the buffer.
-/// 
+///
 /// See also [`capacity()`](Self::capacity) for the allocated size, and
 /// [`Buffer`] for more details.
 pub fn len(&self) -> usize {
@@ -46,14 +46,14 @@ pub fn parse<T: FromStr>(input: &str) -> Result<T, Error> {
 
 ## Link Syntax
 
-| Syntax | Links To | Example |
-|--------|----------|---------|
-| `[Name]` | Item in scope | `[Vec]`, `[Option]` |
-| `[path::Name]` | Fully qualified item | `[std::vec::Vec]` |
-| `[Self::method]` | Method on current type | `[Self::new]` |
-| `[Type::method]` | Method on other type | `[String::new]` |
-| `[Type::CONST]` | Associated constant | `[usize::MAX]` |
-| `[text](path)` | Custom text | `[see here](Self::len)` |
+| Syntax           | Links To               | Example                 |
+| ---------------- | ---------------------- | ----------------------- |
+| `[Name]`         | Item in scope          | `[Vec]`, `[Option]`     |
+| `[path::Name]`   | Fully qualified item   | `[std::vec::Vec]`       |
+| `[Self::method]` | Method on current type | `[Self::new]`           |
+| `[Type::method]` | Method on other type   | `[String::new]`         |
+| `[Type::CONST]`  | Associated constant    | `[usize::MAX]`          |
+| `[text](path)`   | Custom text            | `[see here](Self::len)` |
 
 ## Common Patterns
 
@@ -65,7 +65,7 @@ impl Buffer {
     ///
     /// Use [`with_capacity`](Self::with_capacity) if you know the size.
     pub fn new() -> Self { /* ... */ }
-    
+
     /// Creates a buffer with pre-allocated capacity.
     ///
     /// See [`new`](Self::new) for the default constructor.
@@ -96,16 +96,16 @@ When names conflict, use suffixes:
 /// Works with [`Error`](struct@Error) struct or [`Error`](trait@Error) trait.
 ```
 
-| Suffix | Item Type |
-|--------|-----------|
-| `fn@` | Function |
-| `mod@` | Module |
-| `struct@` | Struct |
-| `enum@` | Enum |
-| `trait@` | Trait |
-| `type@` | Type alias |
-| `const@` | Constant |
-| `macro@` | Macro |
+| Suffix    | Item Type  |
+| --------- | ---------- |
+| `fn@`     | Function   |
+| `mod@`    | Module     |
+| `struct@` | Struct     |
+| `enum@`   | Enum       |
+| `trait@`  | Trait      |
+| `type@`   | Type alias |
+| `const@`  | Constant   |
+| `macro@`  | Macro      |
 
 ### Reference-Style Links
 

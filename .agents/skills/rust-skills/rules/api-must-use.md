@@ -28,7 +28,7 @@ compute_checksum(&data);  // Result discarded - pointless call
 #[must_use = "this `Result` may be an `Err` that should be handled"]
 fn send_email(to: &str, body: &str) -> Result<(), EmailError> { ... }
 
-send_email("user@example.com", "Hello!");  
+send_email("user@example.com", "Hello!");
 // Warning: unused `Result` that must be used
 
 // Mark pure functions

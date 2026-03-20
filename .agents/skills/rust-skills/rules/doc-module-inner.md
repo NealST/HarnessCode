@@ -29,7 +29,7 @@ pub struct Session { /* ... */ }
 
 ## Good
 
-```rust
+````rust
 //! Authentication and authorization utilities.
 //!
 //! This module provides multiple authentication strategies:
@@ -55,19 +55,19 @@ pub struct Session { /* ... */ }
 use std::collections::HashMap;
 
 pub struct Session { /* ... */ }
-```
+````
 
 ## Where to Use Inner Docs
 
-| Location | Purpose |
-|----------|---------|
-| `lib.rs` | Crate-level documentation (appears on crate root) |
-| `mod.rs` | Module documentation for directory modules |
-| `module.rs` | Module documentation for single-file modules |
+| Location    | Purpose                                           |
+| ----------- | ------------------------------------------------- |
+| `lib.rs`    | Crate-level documentation (appears on crate root) |
+| `mod.rs`    | Module documentation for directory modules        |
+| `module.rs` | Module documentation for single-file modules      |
 
 ## Crate Root Example
 
-```rust
+````rust
 //! # My Awesome Crate
 //!
 //! `my_crate` provides utilities for handling complex workflows.
@@ -99,7 +99,7 @@ pub struct Session { /* ... */ }
 pub mod workflow;
 pub mod steps;
 pub mod prelude;
-```
+````
 
 ## Key Sections for Module Docs
 

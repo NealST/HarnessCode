@@ -68,16 +68,16 @@ let s = format!("{}{}", a, b);  // When both are &str, use: a.to_owned() + b
 
 ## Notable Lints in This Group
 
-| Lint | Improvement |
-|------|-------------|
-| `box_collection` | Use `Vec<T>` not `Box<Vec<T>>` |
-| `iter_nth` | Use `.get(n)` or `.next()` |
-| `large_enum_variant` | Box large variants |
-| `manual_memcpy` | Use slice copy methods |
-| `redundant_allocation` | Remove double boxing |
-| `single_char_pattern` | Use `char` not `&str` |
-| `slow_vector_initialization` | Use `vec![0; n]` |
-| `unnecessary_to_owned` | Remove redundant `.to_owned()` |
+| Lint                         | Improvement                    |
+| ---------------------------- | ------------------------------ |
+| `box_collection`             | Use `Vec<T>` not `Box<Vec<T>>` |
+| `iter_nth`                   | Use `.get(n)` or `.next()`     |
+| `large_enum_variant`         | Box large variants             |
+| `manual_memcpy`              | Use slice copy methods         |
+| `redundant_allocation`       | Remove double boxing           |
+| `single_char_pattern`        | Use `char` not `&str`          |
+| `slow_vector_initialization` | Use `vec![0; n]`               |
+| `unnecessary_to_owned`       | Remove redundant `.to_owned()` |
 
 ## Examples
 

@@ -138,9 +138,7 @@ export default function SettingsPanel({ open, onClose }: Props) {
         {/* Footer */}
         <Separator className="bg-gray-800" />
         <div className="flex items-center justify-between px-5 py-4">
-          {saved && (
-            <span className="text-xs text-green-400">✓ Saved</span>
-          )}
+          {saved && <span className="text-xs text-green-400">✓ Saved</span>}
           {!saved && <span />}
           <button
             className="btn-primary"

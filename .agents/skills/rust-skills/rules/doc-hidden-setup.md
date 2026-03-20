@@ -10,7 +10,7 @@ This keeps examples focused and readable while ensuring they still compile and r
 
 ## Bad
 
-```rust
+````rust
 /// Processes a batch of items.
 ///
 /// # Examples
@@ -18,7 +18,7 @@ This keeps examples focused and readable while ensuring they still compile and r
 /// ```
 /// use my_crate::{Processor, Config, Item};
 /// use std::sync::Arc;
-/// 
+///
 /// let config = Config {
 ///     batch_size: 100,
 ///     timeout_ms: 5000,
@@ -30,7 +30,7 @@ This keeps examples focused and readable while ensuring they still compile and r
 ///     Item::new("b"),
 ///     Item::new("c"),
 /// ];
-/// 
+///
 /// // This is the actual example - buried after 15 lines of setup
 /// let results = processor.process_batch(&items)?;
 /// assert!(results.all_succeeded());
@@ -39,11 +39,11 @@ This keeps examples focused and readable while ensuring they still compile and r
 pub fn process_batch(&self, items: &[Item]) -> Result<Results, Error> {
     // ...
 }
-```
+````
 
 ## Good
 
-```rust
+````rust
 /// Processes a batch of items.
 ///
 /// # Examples
@@ -61,7 +61,7 @@ pub fn process_batch(&self, items: &[Item]) -> Result<Results, Error> {
 pub fn process_batch(&self, items: &[Item]) -> Result<Results, Error> {
     // ...
 }
-```
+````
 
 Users see only:
 
@@ -72,17 +72,17 @@ assert!(results.all_succeeded());
 
 ## What to Hide
 
-| Hide | Show |
-|------|------|
-| `use` statements | Core API usage |
-| Type definitions | Method calls |
-| Mock/test data setup | Key parameters |
-| Error handling boilerplate | Return value handling |
-| `Ok(())` return | Assertions (sometimes) |
+| Hide                       | Show                   |
+| -------------------------- | ---------------------- |
+| `use` statements           | Core API usage         |
+| Type definitions           | Method calls           |
+| Mock/test data setup       | Key parameters         |
+| Error handling boilerplate | Return value handling  |
+| `Ok(())` return            | Assertions (sometimes) |
 
 ## Pattern: Hiding Multi-Line Setup
 
-```rust
+````rust
 /// # Examples
 ///
 /// ```
@@ -97,13 +97,13 @@ assert!(results.all_succeeded());
 /// # Ok(())
 /// # }
 /// ```
-```
+````
 
 ## Pattern: Showing Setup When Relevant
 
 Sometimes setup IS the point—don't hide it:
 
-```rust
+````rust
 /// Creates a new client with custom configuration.
 ///
 /// # Examples
@@ -119,13 +119,13 @@ Sometimes setup IS the point—don't hide it:
 ///     .build()?;
 /// # Ok::<(), my_crate::Error>(())
 /// ```
-```
+````
 
 ## Pattern: `ignore` and `no_run`
 
 For examples that shouldn't run in tests:
 
-```rust
+````rust
 /// # Examples
 ///
 /// ```no_run
@@ -140,7 +140,7 @@ For examples that shouldn't run in tests:
 /// // Pseudocode or incomplete example
 /// let magic = do_something_undefined();
 /// ```
-```
+````
 
 ## See Also
 

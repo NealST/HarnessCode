@@ -5,33 +5,33 @@
 /* ── shadcn/ui CSS variable definitions (dark-first: this app is dark-only) ── */
 @layer base {
   :root {
-    --background:         222 47% 5%;    /* gray-950 */
-    --foreground:         210 40% 94%;   /* gray-100 */
+    --background: 222 47% 5%; /* gray-950 */
+    --foreground: 210 40% 94%; /* gray-100 */
 
-    --card:               222 47% 8%;    /* gray-900 */
-    --card-foreground:    210 40% 94%;
+    --card: 222 47% 8%; /* gray-900 */
+    --card-foreground: 210 40% 94%;
 
-    --popover:            222 47% 8%;
+    --popover: 222 47% 8%;
     --popover-foreground: 210 40% 94%;
 
-    --primary:            199 89% 48%;   /* brand-500 */
+    --primary: 199 89% 48%; /* brand-500 */
     --primary-foreground: 0 0% 100%;
 
-    --secondary:          217 32% 17%;   /* gray-800 */
+    --secondary: 217 32% 17%; /* gray-800 */
     --secondary-foreground: 210 40% 94%;
 
-    --muted:              217 32% 17%;
-    --muted-foreground:   215 20% 55%;   /* gray-400 */
+    --muted: 217 32% 17%;
+    --muted-foreground: 215 20% 55%; /* gray-400 */
 
-    --accent:             215 28% 23%;   /* gray-700 */
-    --accent-foreground:  210 40% 94%;
+    --accent: 215 28% 23%; /* gray-700 */
+    --accent-foreground: 210 40% 94%;
 
-    --destructive:        0 72% 51%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
-    --border:             217 32% 17%;   /* gray-800 */
-    --input:              217 32% 17%;
-    --ring:               199 89% 48%;
+    --border: 217 32% 17%; /* gray-800 */
+    --input: 217 32% 17%;
+    --ring: 199 89% 48%;
 
     --radius: 0.75rem;
   }

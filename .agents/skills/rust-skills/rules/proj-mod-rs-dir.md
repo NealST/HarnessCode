@@ -52,12 +52,12 @@ pub use model::User;
 
 ## When to Use Each
 
-| Scenario | Recommendation |
-|----------|----------------|
+| Scenario                       | Recommendation                      |
+| ------------------------------ | ----------------------------------- |
 | Simple module (1-3 submodules) | Adjacent file (`user.rs` + `user/`) |
-| Complex module (4+ submodules) | `mod.rs` style (`user/mod.rs`) |
-| Deep nesting | `mod.rs` at each level |
-| Library with public modules | Consistent style throughout |
+| Complex module (4+ submodules) | `mod.rs` style (`user/mod.rs`)      |
+| Deep nesting                   | `mod.rs` at each level              |
+| Library with public modules    | Consistent style throughout         |
 
 ## mod.rs Benefits
 

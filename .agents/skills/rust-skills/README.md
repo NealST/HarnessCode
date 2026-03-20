@@ -34,24 +34,25 @@ The agent loads the relevant rules and applies them to your code.
 
 179 rules split into 14 categories:
 
-| Category | Rules | What it covers |
-|----------|-------|----------------|
-| **Ownership & Borrowing** | 12 | When to borrow vs clone, Arc/Rc, lifetimes |
-| **Error Handling** | 12 | thiserror for libs, anyhow for apps, the `?` operator |
-| **Memory** | 15 | SmallVec, arenas, avoiding allocations |
-| **API Design** | 15 | Builder pattern, newtypes, sealed traits |
-| **Async** | 15 | Tokio patterns, channels, spawn_blocking |
-| **Optimization** | 12 | LTO, inlining, PGO, SIMD |
-| **Naming** | 16 | Following Rust API Guidelines |
-| **Type Safety** | 10 | Newtypes, parse don't validate |
-| **Testing** | 13 | Proptest, mockall, criterion |
-| **Docs** | 11 | Doc examples, intra-doc links |
-| **Performance** | 11 | Iterators, entry API, collect patterns |
-| **Project Structure** | 11 | Workspaces, module layout |
-| **Linting** | 11 | Clippy config, CI setup |
-| **Anti-patterns** | 15 | Common mistakes and how to fix them |
+| Category                  | Rules | What it covers                                        |
+| ------------------------- | ----- | ----------------------------------------------------- |
+| **Ownership & Borrowing** | 12    | When to borrow vs clone, Arc/Rc, lifetimes            |
+| **Error Handling**        | 12    | thiserror for libs, anyhow for apps, the `?` operator |
+| **Memory**                | 15    | SmallVec, arenas, avoiding allocations                |
+| **API Design**            | 15    | Builder pattern, newtypes, sealed traits              |
+| **Async**                 | 15    | Tokio patterns, channels, spawn_blocking              |
+| **Optimization**          | 12    | LTO, inlining, PGO, SIMD                              |
+| **Naming**                | 16    | Following Rust API Guidelines                         |
+| **Type Safety**           | 10    | Newtypes, parse don't validate                        |
+| **Testing**               | 13    | Proptest, mockall, criterion                          |
+| **Docs**                  | 11    | Doc examples, intra-doc links                         |
+| **Performance**           | 11    | Iterators, entry API, collect patterns                |
+| **Project Structure**     | 11    | Workspaces, module layout                             |
+| **Linting**               | 11    | Clippy config, CI setup                               |
+| **Anti-patterns**         | 15    | Common mistakes and how to fix them                   |
 
 Each rule has:
+
 - Why it matters
 - Bad code example
 - Good code example
@@ -65,14 +66,17 @@ If `add-skill` doesn't work for your setup, here's how to install manually:
 <summary><b>Claude Code</b></summary>
 
 Global (applies to all projects):
+
 ```bash
 git clone https://github.com/leonardomso/rust-skills.git ~/.claude/skills/rust-skills
 ```
 
 Or just for one project:
+
 ```bash
 git clone https://github.com/leonardomso/rust-skills.git .claude/skills/rust-skills
 ```
+
 </details>
 
 <details>
@@ -81,6 +85,7 @@ git clone https://github.com/leonardomso/rust-skills.git .claude/skills/rust-ski
 ```bash
 git clone https://github.com/leonardomso/rust-skills.git .opencode/skills/rust-skills
 ```
+
 </details>
 
 <details>
@@ -91,9 +96,11 @@ git clone https://github.com/leonardomso/rust-skills.git .cursor/skills/rust-ski
 ```
 
 Or just grab the skill file:
+
 ```bash
 curl -o .cursorrules https://raw.githubusercontent.com/leonardomso/rust-skills/master/SKILL.md
 ```
+
 </details>
 
 <details>
@@ -103,6 +110,7 @@ curl -o .cursorrules https://raw.githubusercontent.com/leonardomso/rust-skills/m
 mkdir -p .windsurf/rules
 curl -o .windsurf/rules/rust-skills.md https://raw.githubusercontent.com/leonardomso/rust-skills/master/SKILL.md
 ```
+
 </details>
 
 <details>
@@ -113,9 +121,11 @@ git clone https://github.com/leonardomso/rust-skills.git .codex/skills/rust-skil
 ```
 
 Or use the AGENTS.md standard:
+
 ```bash
 curl -o AGENTS.md https://raw.githubusercontent.com/leonardomso/rust-skills/master/SKILL.md
 ```
+
 </details>
 
 <details>
@@ -125,20 +135,24 @@ curl -o AGENTS.md https://raw.githubusercontent.com/leonardomso/rust-skills/mast
 mkdir -p .github
 curl -o .github/copilot-instructions.md https://raw.githubusercontent.com/leonardomso/rust-skills/master/SKILL.md
 ```
+
 </details>
 
 <details>
 <summary><b>Aider</b></summary>
 
 Add to `.aider.conf.yml`:
+
 ```yaml
 read: path/to/rust-skills/SKILL.md
 ```
 
 Or pass it directly:
+
 ```bash
 aider --read path/to/rust-skills/SKILL.md
 ```
+
 </details>
 
 <details>
@@ -147,6 +161,7 @@ aider --read path/to/rust-skills/SKILL.md
 ```bash
 curl -o AGENTS.md https://raw.githubusercontent.com/leonardomso/rust-skills/master/SKILL.md
 ```
+
 </details>
 
 <details>
@@ -155,6 +170,7 @@ curl -o AGENTS.md https://raw.githubusercontent.com/leonardomso/rust-skills/mast
 ```bash
 git clone https://github.com/leonardomso/rust-skills.git .agents/skills/rust-skills
 ```
+
 </details>
 
 <details>
@@ -164,15 +180,18 @@ git clone https://github.com/leonardomso/rust-skills.git .agents/skills/rust-ski
 mkdir -p .clinerules
 curl -o .clinerules/rust-skills.md https://raw.githubusercontent.com/leonardomso/rust-skills/master/SKILL.md
 ```
+
 </details>
 
 <details>
 <summary><b>Other agents (AGENTS.md)</b></summary>
 
 If your agent supports the [AGENTS.md](https://agents.md) standard:
+
 ```bash
 curl -o AGENTS.md https://raw.githubusercontent.com/leonardomso/rust-skills/master/SKILL.md
 ```
+
 </details>
 
 ## All rules

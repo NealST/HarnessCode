@@ -72,12 +72,12 @@ if upgradeable.get("key").is_none() {
 
 RwLock has overhead for tracking readers. It can be slower than Mutex when:
 
-| Scenario | Better Choice |
-|----------|---------------|
-| Writes are frequent (>20% of operations) | `Mutex` |
-| Lock held very briefly | `Mutex` |
-| Single-threaded | `RefCell` |
-| Reads dominate, lock held longer | `RwLock` |
+| Scenario                                 | Better Choice |
+| ---------------------------------------- | ------------- |
+| Writes are frequent (>20% of operations) | `Mutex`       |
+| Lock held very briefly                   | `Mutex`       |
+| Single-threaded                          | `RefCell`     |
+| Reads dominate, lock held longer         | `RwLock`      |
 
 ## Write Starvation
 
@@ -107,7 +107,7 @@ impl CachedData {
         if let Some(cached) = self.cache.read().as_ref() {
             return cached.clone();
         }
-        
+
         // Slow path: compute and cache
         let result = compute_expensive();
         *self.cache.write() = Some(result.clone());

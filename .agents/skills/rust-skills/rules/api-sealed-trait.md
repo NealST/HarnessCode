@@ -76,22 +76,22 @@ pub mod db {
     mod private {
         pub trait Sealed {}
     }
-    
+
     /// Database driver trait.
-    /// 
+    ///
     /// This trait is sealed and cannot be implemented outside this crate.
     pub trait Driver: private::Sealed {
         /// Connects to the database.
         fn connect(&self, url: &str) -> Result<Connection, Error>;
-        
+
         /// Executes a query.
         fn execute(&self, sql: &str) -> Result<Rows, Error>;
     }
-    
+
     pub struct Postgres;
     impl private::Sealed for Postgres {}
     impl Driver for Postgres { ... }
-    
+
     pub struct Sqlite;
     impl private::Sealed for Sqlite {}
     impl Driver for Sqlite { ... }
@@ -113,7 +113,7 @@ query(&Postgres);
 // 1. Add methods without breaking changes
 pub trait Format: private::Sealed {
     fn format(&self) -> String;
-    
+
     // Added later - not breaking because no external impls exist
     fn format_pretty(&self) -> String {
         self.format()  // Default implementation
@@ -143,7 +143,7 @@ pub trait Plugin: private::SealedCore {
     // Sealed - only we implement
     fn initialize(&self);
     fn shutdown(&self);
-    
+
     // Open - users can override
     fn name(&self) -> &str { "unnamed" }
 }
@@ -154,12 +154,12 @@ pub trait Plugin: private::SealedCore {
 
 ## When to Seal
 
-| Seal When | Don't Seal When |
-|-----------|-----------------|
-| API stability is critical | You want extension points |
-| Implementation correctness is hard | Users need custom implementations |
-| You'll add methods later | Trait is simple and stable |
-| Safety invariants required | Standard patterns (Iterator, etc.) |
+| Seal When                          | Don't Seal When                    |
+| ---------------------------------- | ---------------------------------- |
+| API stability is critical          | You want extension points          |
+| Implementation correctness is hard | Users need custom implementations  |
+| You'll add methods later           | Trait is simple and stable         |
+| Safety invariants required         | Standard patterns (Iterator, etc.) |
 
 ## See Also
 

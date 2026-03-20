@@ -16,7 +16,7 @@ fn build_tree() -> Arc<Node> {
     let root = Arc::new(Node::new("root"));
     let child1 = Arc::new(Node::new("child1"));
     let child2 = Arc::new(Node::new("child2"));
-    
+
     // All in same thread, but paying atomic overhead
     root.add_child(child1.clone());
     root.add_child(child2.clone());
@@ -36,7 +36,7 @@ fn build_tree() -> Rc<Node> {
     let root = Rc::new(Node::new("root"));
     let child1 = Rc::new(Node::new("child1"));
     let child2 = Rc::new(Node::new("child2"));
-    
+
     root.add_child(child1.clone());
     root.add_child(child2.clone());
     root
@@ -48,12 +48,12 @@ fn build_tree() -> Rc<Node> {
 
 ## Decision Guide
 
-| Scenario | Use |
-|----------|-----|
-| Single-threaded, shared ownership | `Rc<T>` |
-| Multi-threaded, shared ownership | `Arc<T>` |
+| Scenario                                | Use                                |
+| --------------------------------------- | ---------------------------------- |
+| Single-threaded, shared ownership       | `Rc<T>`                            |
+| Multi-threaded, shared ownership        | `Arc<T>`                           |
 | Single owner, might need multiple later | Start with `Rc`, upgrade if needed |
-| Library code, unknown threading model | `Arc<T>` (safer default) |
+| Library code, unknown threading model   | `Arc<T>` (safer default)           |
 
 ## Evidence
 

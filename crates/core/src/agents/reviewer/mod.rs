@@ -10,8 +10,10 @@ use tracing::info;
 
 /// Reviewer agent backed by an LLM.
 ///
-/// Receives the combined code-changes + risk-assessment context and returns a
-/// structured review verdict (`approved`, `issues`, `security_concerns`, …).
+/// Receives the combined plan + code-changes + risk-assessment context and returns a
+/// structured review verdict (`approved`, `criteria_met`, `issues`, `security_concerns`, …).
+/// The pipeline only converges when **both** `approved` and `criteria_met` are true,
+/// closing the TOTE (Test-Operate-Test-Exit) loop.
 pub struct LlmReviewerAgent {
     pub llm: Arc<dyn LlmProvider>,
 }
@@ -38,16 +40,27 @@ impl Agent for LlmReviewerAgent {
             .get("approved")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        let criteria_met = payload
+            .get("criteria_met")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let passed = approved && criteria_met;
         let recommendation = payload
             .get("recommendation")
             .and_then(|r| r.as_str())
-            .unwrap_or(if approved { "Approved" } else { "Rejected — revisions required" });
+            .unwrap_or(if passed {
+                "Approved"
+            } else if !criteria_met {
+                "Rejected — success criteria not met"
+            } else {
+                "Rejected — revisions required"
+            });
 
         Ok(AgentOutput {
             role: AgentRole::Reviewer,
             summary: recommendation.to_string(),
             payload,
-            success: approved,
+            success: passed,
             tokens,
         })
     }

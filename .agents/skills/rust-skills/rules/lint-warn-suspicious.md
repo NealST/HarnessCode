@@ -52,7 +52,7 @@ if (x = 5) { }  // Probably meant x == 5
 
 ```rust
 // WARN: Suspicious map usage
-let _: Vec<_> = vec.iter().map(|x| { 
+let _: Vec<_> = vec.iter().map(|x| {
     println!("{}", x);  // Side effect in map
     x
 }).collect();  // Use for_each instead
@@ -73,15 +73,15 @@ let n = 3.14_f64 as i32;  // May want .round() first
 
 ## Notable Lints in This Group
 
-| Lint | Description |
-|------|-------------|
-| `suspicious_arithmetic_impl` | Unusual operator in arithmetic trait |
-| `suspicious_assignment_formatting` | Looks like typo in assignment |
-| `suspicious_else_formatting` | Else on wrong line |
-| `suspicious_map` | Map with side effects |
-| `suspicious_op_assign_impl` | Unusual op-assign implementation |
-| `suspicious_splitn` | splitn that can't produce n parts |
-| `suspicious_unary_op_formatting` | Confusing unary operator spacing |
+| Lint                               | Description                          |
+| ---------------------------------- | ------------------------------------ |
+| `suspicious_arithmetic_impl`       | Unusual operator in arithmetic trait |
+| `suspicious_assignment_formatting` | Looks like typo in assignment        |
+| `suspicious_else_formatting`       | Else on wrong line                   |
+| `suspicious_map`                   | Map with side effects                |
+| `suspicious_op_assign_impl`        | Unusual op-assign implementation     |
+| `suspicious_splitn`                | splitn that can't produce n parts    |
+| `suspicious_unary_op_formatting`   | Confusing unary operator spacing     |
 
 ## Example Catches
 

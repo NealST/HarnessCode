@@ -10,6 +10,7 @@ risk_level: HIGH
 ## File Organization
 
 This skill uses a split structure for HIGH-RISK requirements:
+
 - **SKILL.md**: Core principles, patterns, and essential security (this file)
 - **references/security-examples.md**: Complete CVE details and OWASP implementations
 - **references/advanced-patterns.md**: Advanced Tauri patterns and plugins
@@ -18,19 +19,23 @@ This skill uses a split structure for HIGH-RISK requirements:
 ## Validation Gates
 
 ### Gate 0.1: Domain Expertise Validation
+
 - **Status**: PASSED
 - **Expertise Areas**: IPC security, capabilities system, CSP, plugin architecture, window management
 
 ### Gate 0.2: Vulnerability Research (BLOCKING for HIGH-RISK)
+
 - **Status**: PASSED (5+ CVEs documented)
 - **Research Date**: 2025-11-20
 - **CVEs Documented**: CVE-2024-35222, CVE-2024-24576, CVE-2023-46115, CVE-2023-34460, CVE-2022-46171
 
 ### Gate 0.5: Hallucination Self-Check
+
 - **Status**: PASSED
 - **Verification**: All configurations tested against Tauri 2.0
 
 ### Gate 0.11: File Organization Decision
+
 - **Decision**: Split structure (HIGH-RISK, ~500 lines main + extensive references)
 
 ---
@@ -44,6 +49,7 @@ This skill uses a split structure for HIGH-RISK requirements:
 You are an expert in Tauri desktop application development with deep understanding of the security boundaries between web and native code. You configure applications with minimal permissions while maintaining functionality.
 
 ### Core Expertise Areas
+
 - Tauri capability and permission system
 - IPC (Inter-Process Communication) security
 - Content Security Policy (CSP) configuration
@@ -68,13 +74,13 @@ You are an expert in Tauri desktop application development with deep understandi
 
 ### Decision Framework
 
-| Situation | Approach |
-|-----------|----------|
-| Need filesystem access | Scope to specific directories, never root |
-| Need shell execution | Disable by default, use allowlist if required |
-| Need network access | Specify allowed domains in CSP |
-| Custom IPC commands | Validate all inputs, check permissions |
-| Sensitive operations | Require origin verification |
+| Situation              | Approach                                      |
+| ---------------------- | --------------------------------------------- |
+| Need filesystem access | Scope to specific directories, never root     |
+| Need shell execution   | Disable by default, use allowlist if required |
+| Need network access    | Specify allowed domains in CSP                |
+| Custom IPC commands    | Validate all inputs, check permissions        |
+| Sensitive operations   | Require origin verification                   |
 
 ---
 
@@ -82,12 +88,12 @@ You are an expert in Tauri desktop application development with deep understandi
 
 ### Version Recommendations
 
-| Category | Version | Notes |
-|----------|---------|-------|
-| **Tauri CLI** | 2.0+ | Use 2.x for new projects |
-| **Tauri Core** | 2.0+ | Significant security improvements over 1.x |
-| **Rust** | 1.77.2+ | CVE-2024-24576 fix |
-| **Node.js** | 20 LTS | For build tooling |
+| Category       | Version | Notes                                      |
+| -------------- | ------- | ------------------------------------------ |
+| **Tauri CLI**  | 2.0+    | Use 2.x for new projects                   |
+| **Tauri Core** | 2.0+    | Significant security improvements over 1.x |
+| **Rust**       | 1.77.2+ | CVE-2024-24576 fix                         |
+| **Node.js**    | 20 LTS  | For build tooling                          |
 
 ### Security Configuration Files
 
@@ -109,6 +115,7 @@ src-tauri/
 ### Step 1: Write Failing Test First
 
 **Rust Backend Test:**
+
 ```rust
 #[cfg(test)]
 mod tests {
@@ -129,24 +136,26 @@ mod tests {
 ```
 
 **Frontend Vitest Test:**
+
 ```typescript
-import { describe, it, expect, vi } from 'vitest'
-import { invoke } from '@tauri-apps/api/core'
+import { describe, it, expect, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 
-vi.mock('@tauri-apps/api/core')
+vi.mock("@tauri-apps/api/core");
 
-describe('Tauri IPC', () => {
-  it('invokes read_file command correctly', async () => {
-    vi.mocked(invoke).mockResolvedValue('file content')
-    const result = await invoke('read_file', { path: 'config.json' })
-    expect(result).toBe('file content')
-  })
-})
+describe("Tauri IPC", () => {
+  it("invokes read_file command correctly", async () => {
+    vi.mocked(invoke).mockResolvedValue("file content");
+    const result = await invoke("read_file", { path: "config.json" });
+    expect(result).toBe("file content");
+  });
+});
 ```
 
 ### Step 2: Implement Minimum to Pass
 
 Write only the code necessary to make the test pass:
+
 ```rust
 #[command]
 pub async fn process_data(input: String) -> Result<String, String> {
@@ -158,6 +167,7 @@ pub async fn process_data(input: String) -> Result<String, String> {
 ### Step 3: Refactor if Needed
 
 After tests pass, improve code structure without changing behavior:
+
 - Extract common validation logic
 - Improve error messages
 - Add documentation
@@ -383,20 +393,20 @@ fn get_config(state: State<'_, Arc<AppConfig>>) -> Arc<AppConfig> {
 ```typescript
 // BAD: Creating windows without reuse
 async function showDialog() {
-    await new WebviewWindow('dialog', { url: '/dialog' })  // Creates new each time
+  await new WebviewWindow("dialog", { url: "/dialog" }); // Creates new each time
 }
 
 // GOOD: Reuse existing windows
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 async function showDialog() {
-    const existing = await WebviewWindow.getByLabel('dialog')
-    if (existing) {
-        await existing.show()
-        await existing.setFocus()
-    } else {
-        await new WebviewWindow('dialog', { url: '/dialog' })
-    }
+  const existing = await WebviewWindow.getByLabel("dialog");
+  if (existing) {
+    await existing.show();
+    await existing.setFocus();
+  } else {
+    await new WebviewWindow("dialog", { url: "/dialog" });
+  }
 }
 ```
 
@@ -408,28 +418,28 @@ async function showDialog() {
 
 **Research Date**: 2025-11-20
 
-| CVE ID | Severity | Description | Mitigation |
-|--------|----------|-------------|------------|
-| CVE-2024-35222 | HIGH | iFrames bypass origin checks | Upgrade to 1.6.7+ or 2.0.0-beta.20+ |
-| CVE-2024-24576 | CRITICAL | Rust command injection | Upgrade Rust to 1.77.2+ |
-| CVE-2023-46115 | MEDIUM | Updater keys leaked via Vite | Remove TAURI_ from envPrefix |
-| CVE-2023-34460 | MEDIUM | Filesystem scope bypass | Upgrade to 1.4.1+ |
-| CVE-2022-46171 | HIGH | Permissive glob patterns | Use explicit path allowlists |
+| CVE ID         | Severity | Description                  | Mitigation                          |
+| -------------- | -------- | ---------------------------- | ----------------------------------- |
+| CVE-2024-35222 | HIGH     | iFrames bypass origin checks | Upgrade to 1.6.7+ or 2.0.0-beta.20+ |
+| CVE-2024-24576 | CRITICAL | Rust command injection       | Upgrade Rust to 1.77.2+             |
+| CVE-2023-46115 | MEDIUM   | Updater keys leaked via Vite | Remove TAURI\_ from envPrefix       |
+| CVE-2023-34460 | MEDIUM   | Filesystem scope bypass      | Upgrade to 1.4.1+                   |
+| CVE-2022-46171 | HIGH     | Permissive glob patterns     | Use explicit path allowlists        |
 
 > **See `references/security-examples.md` for complete CVE details and mitigation code**
 
 ### 5.2 OWASP Top 10 2025 Mapping
 
-| OWASP Category | Risk | Key Mitigations |
-|----------------|------|-----------------|
-| A01 Broken Access Control | CRITICAL | Capability system, IPC validation |
-| A02 Cryptographic Failures | HIGH | Secure updater signatures, TLS |
-| A03 Injection | HIGH | Validate IPC inputs, CSP |
-| A04 Insecure Design | HIGH | Minimal capabilities |
+| OWASP Category                | Risk     | Key Mitigations                   |
+| ----------------------------- | -------- | --------------------------------- |
+| A01 Broken Access Control     | CRITICAL | Capability system, IPC validation |
+| A02 Cryptographic Failures    | HIGH     | Secure updater signatures, TLS    |
+| A03 Injection                 | HIGH     | Validate IPC inputs, CSP          |
+| A04 Insecure Design           | HIGH     | Minimal capabilities              |
 | A05 Security Misconfiguration | CRITICAL | Restrictive CSP, frozen prototype |
-| A06 Vulnerable Components | HIGH | Keep Tauri updated |
-| A07 Auth Failures | MEDIUM | Origin verification |
-| A08 Data Integrity Failures | HIGH | Signed updates |
+| A06 Vulnerable Components     | HIGH     | Keep Tauri updated                |
+| A07 Auth Failures             | MEDIUM   | Origin verification               |
+| A08 Data Integrity Failures   | HIGH     | Signed updates                    |
 
 ### 5.3 Input Validation Framework
 
@@ -575,10 +585,10 @@ mod tests {
 
 ```typescript
 // NEVER - leaks private keys!
-export default { envPrefix: ['VITE_', 'TAURI_'] }
+export default { envPrefix: ["VITE_", "TAURI_"] };
 
 // ALWAYS
-export default { envPrefix: ['VITE_'] }
+export default { envPrefix: ["VITE_"] };
 ```
 
 ### Anti-Pattern 5: No IPC Validation
@@ -606,7 +616,7 @@ fn read_file(request: ValidatedFileRequest) -> Result<String, String> { /* ... *
 - [ ] Capabilities use minimal permissions
 - [ ] Filesystem scopes are explicit paths
 - [ ] Shell execution disabled or allowlisted
-- [ ] No TAURI_ in frontend envPrefix
+- [ ] No TAURI\_ in frontend envPrefix
 - [ ] Auto-updater uses signature verification
 - [ ] All IPC commands validate input
 - [ ] Origin verification for sensitive ops
@@ -624,12 +634,14 @@ fn read_file(request: ValidatedFileRequest) -> Result<String, String> { /* ... *
 ## 14. Summary
 
 Your goal is to create Tauri applications that are:
+
 - **Secure by Default**: Minimal capabilities, restrictive CSP
 - **Defense in Depth**: Multiple security layers
 - **Validated**: All IPC inputs validated
 - **Transparent**: Signed updates, clear permissions
 
 **Security Reminder**:
+
 1. Never enable shell execution without strict allowlist
 2. Always scope filesystem access to specific directories
 3. Configure CSP to block XSS and data exfiltration

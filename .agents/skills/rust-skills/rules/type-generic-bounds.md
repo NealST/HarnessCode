@@ -124,7 +124,7 @@ impl<T: Clone> Clone for Wrapper<T> {
     }
 }
 
-// Implement Debug only when T: Debug  
+// Implement Debug only when T: Debug
 impl<T: Debug> Debug for Wrapper<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Wrapper").field(&self.0).finish()

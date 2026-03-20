@@ -100,12 +100,12 @@ process(b"bytes");           // Byte string
 
 ## Similar Anti-patterns
 
-| Anti-pattern | Better |
-|--------------|--------|
-| `&Vec<T>` | `&[T]` |
-| `&String` | `&str` |
-| `&PathBuf` | `&Path` |
-| `&Box<T>` | `&T` |
+| Anti-pattern | Better  |
+| ------------ | ------- |
+| `&Vec<T>`    | `&[T]`  |
+| `&String`    | `&str`  |
+| `&PathBuf`   | `&Path` |
+| `&Box<T>`    | `&T`    |
 
 ## Clippy Detection
 

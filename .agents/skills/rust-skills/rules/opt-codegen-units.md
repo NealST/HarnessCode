@@ -28,7 +28,7 @@ opt-level = 3      # Maximum optimization
 ## What codegen-units Affects
 
 | Codegen Units | Compile Time | Runtime Performance | Memory Use |
-|---------------|--------------|---------------------|------------|
+| ------------- | ------------ | ------------------- | ---------- |
 | 16 (default)  | Faster       | Baseline            | Lower      |
 | 4-8           | Moderate     | Slightly better     | Moderate   |
 | 1             | Slower       | Best                | Higher     |

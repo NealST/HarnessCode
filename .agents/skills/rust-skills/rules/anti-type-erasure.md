@@ -84,11 +84,11 @@ struct EventLoop {
 
 ## Comparison
 
-| Approach | Allocation | Dispatch | Binary Size |
-|----------|------------|----------|-------------|
-| `impl Trait` | Stack/inline | Static | Larger (monomorphization) |
-| `Box<dyn Trait>` | Heap | Dynamic | Smaller |
-| Generics `<T>` | Stack/inline | Static | Larger |
+| Approach         | Allocation   | Dispatch | Binary Size               |
+| ---------------- | ------------ | -------- | ------------------------- |
+| `impl Trait`     | Stack/inline | Static   | Larger (monomorphization) |
+| `Box<dyn Trait>` | Heap         | Dynamic  | Smaller                   |
+| Generics `<T>`   | Stack/inline | Static   | Larger                    |
 
 ## impl Trait Positions
 

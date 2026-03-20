@@ -60,14 +60,14 @@ reorder_imports = true
 
 ## Common Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `max_width` | 100 | Maximum line width |
-| `tab_spaces` | 4 | Spaces per indent |
-| `edition` | "2015" | Rust edition |
-| `use_small_heuristics` | "Default" | Layout heuristics |
-| `imports_granularity` | "Preserve" | Import grouping |
-| `group_imports` | "Preserve" | Import ordering |
+| Option                 | Default    | Description        |
+| ---------------------- | ---------- | ------------------ |
+| `max_width`            | 100        | Maximum line width |
+| `tab_spaces`           | 4          | Spaces per indent  |
+| `edition`              | "2015"     | Rust edition       |
+| `use_small_heuristics` | "Default"  | Layout heuristics  |
+| `imports_granularity`  | "Preserve" | Import grouping    |
+| `group_imports`        | "Preserve" | Import ordering    |
 
 ## Running Locally
 

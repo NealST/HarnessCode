@@ -30,7 +30,7 @@ pub mod commands;
 pub mod obs;
 
 use harnesscode_core::agents::DriftDecision;
-use harnesscode_core::controller::PipelineEvent;
+use harnesscode_core::controller::{ClarificationResolution, PipelineEvent};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -47,6 +47,9 @@ pub struct PipelineState {
     /// via [`commands::submit_drift_decision`].  `None` when no drift prompt
     /// is currently active.
     pub drift_decision_tx: Mutex<Option<tokio::sync::oneshot::Sender<DriftDecision>>>,
+    /// Resolves a clarification request when the user submits additional context
+    /// via [`commands::submit_clarification_response`].
+    pub clarification_tx: Mutex<Option<tokio::sync::oneshot::Sender<ClarificationResolution>>>,
 }
 
 // ──────────────────────────────────────────────
@@ -58,6 +61,40 @@ pub struct PipelineState {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PipelineEventDto {
     StageStarted { role: String },
+    JudgeReady {
+        route: String,
+        route_reason_code: String,
+        ready_for_scoper: bool,
+        ready_for_planner: bool,
+        ask_user_clarification: bool,
+        effective_request: String,
+        goal_is_concrete: bool,
+        constraints_are_stable: bool,
+        history_resolves_references: bool,
+        repository_grounding_needed: bool,
+        prior_scope_can_be_reused: bool,
+        skip_scoper_criteria_met: Vec<String>,
+        missing_information: Vec<String>,
+        clarifying_questions: Vec<String>,
+        confidence: String,
+    },
+    ScopeReady {
+        task_type: String,
+        objective: String,
+        in_scope: Vec<String>,
+        out_of_scope: Vec<String>,
+        unknowns: Vec<String>,
+        success_criteria: Vec<String>,
+        relevant_files: Vec<String>,
+        needs_user_clarification: bool,
+        clarifying_questions: Vec<String>,
+        confidence: String,
+    },
+    ClarificationRequested {
+        source: String,
+        objective: String,
+        questions: Vec<String>,
+    },
     /// The planner finished and produced an ordered action plan.
     PlanReady {
         steps: Vec<String>,
@@ -80,18 +117,83 @@ impl From<PipelineEvent> for PipelineEventDto {
     fn from(e: PipelineEvent) -> Self {
         match e {
             PipelineEvent::StageStarted { role } => Self::StageStarted {
-                role: role.to_string(),
+                role: role.to_string().to_lowercase(),
+            },
+            PipelineEvent::JudgeReady {
+                route,
+                route_reason_code,
+                ready_for_scoper,
+                ready_for_planner,
+                ask_user_clarification,
+                effective_request,
+                goal_is_concrete,
+                constraints_are_stable,
+                history_resolves_references,
+                repository_grounding_needed,
+                prior_scope_can_be_reused,
+                skip_scoper_criteria_met,
+                missing_information,
+                clarifying_questions,
+                confidence,
+            } => Self::JudgeReady {
+                route,
+                route_reason_code,
+                ready_for_scoper,
+                ready_for_planner,
+                ask_user_clarification,
+                effective_request,
+                goal_is_concrete,
+                constraints_are_stable,
+                history_resolves_references,
+                repository_grounding_needed,
+                prior_scope_can_be_reused,
+                skip_scoper_criteria_met,
+                missing_information,
+                clarifying_questions,
+                confidence,
+            },
+            PipelineEvent::ScopeReady {
+                task_type,
+                objective,
+                in_scope,
+                out_of_scope,
+                unknowns,
+                success_criteria,
+                relevant_files,
+                needs_user_clarification,
+                clarifying_questions,
+                confidence,
+            } => Self::ScopeReady {
+                task_type,
+                objective,
+                in_scope,
+                out_of_scope,
+                unknowns,
+                success_criteria,
+                relevant_files,
+                needs_user_clarification,
+                clarifying_questions,
+                confidence,
+            },
+            PipelineEvent::ClarificationRequested {
+                source,
+                objective,
+                questions,
+            } => Self::ClarificationRequested {
+                source: source.to_string().to_lowercase(),
+                objective,
+                questions,
             },
             PipelineEvent::PlanReady { steps, affected_files, complexity } =>
                 Self::PlanReady { steps, affected_files, complexity },
             PipelineEvent::StageCompleted { output } => Self::StageCompleted {
-                role: output.role.to_string(),
+                role: output.role.to_string().to_lowercase(),
                 summary: output.summary.clone(),
                 success: output.success,
             },
             PipelineEvent::PipelineFailed { error } => Self::PipelineFailed { error },
             PipelineEvent::NetworkError { category, message, role } =>
-                Self::NetworkError { category, message, role: role.to_string() },
+                Self::NetworkError { category, message, role: role.to_string().to_lowercase() },
         }
     }
 }
@@ -184,6 +286,7 @@ pub fn run() {
             commands::save_settings,
             commands::get_run_history,
             commands::submit_drift_decision,
+            commands::submit_clarification_response,
         ])
         .run(tauri::generate_context!())
         .expect("error while running HarnessCode desktop application");

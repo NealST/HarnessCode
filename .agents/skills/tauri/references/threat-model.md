@@ -5,18 +5,21 @@
 **Domain Risk Level**: HIGH
 
 ### Assets to Protect
+
 1. **User Data** - Application data, credentials, personal files - **Sensitivity**: CRITICAL
 2. **System Access** - Filesystem, shell, network - **Sensitivity**: CRITICAL
 3. **Update Mechanism** - Application integrity - **Sensitivity**: HIGH
 4. **IPC Channel** - Communication between frontend and backend - **Sensitivity**: HIGH
 
 ### Threat Actors
+
 1. **Malicious Websites** - XSS, CSRF via embedded content
 2. **Supply Chain Attackers** - Compromised dependencies, malicious updates
 3. **Local Attackers** - Users with system access trying to escalate privileges
 4. **Network Attackers** - MitM on updates, API hijacking
 
 ### Attack Surface
+
 - WebView content (XSS, injection)
 - IPC commands from frontend
 - Filesystem access patterns
@@ -35,6 +38,7 @@
 **Attack Description**: Attacker injects malicious JavaScript into the WebView, which then calls Tauri IPC commands to access system resources.
 
 **Attack Flow**:
+
 ```
 1. Application loads external content or user-provided HTML
 2. Attacker injects: <script>window.__TAURI__.invoke('read_file', {path: '/etc/passwd'})</script>
@@ -45,6 +49,7 @@
 ```
 
 **Impact**:
+
 - **Confidentiality**: CRITICAL - Full filesystem access
 - **Integrity**: HIGH - Can modify files
 - **Availability**: MEDIUM - Can delete files
@@ -80,6 +85,7 @@ async fn read_file(window: Window, request: FileRequest) -> Result<String, Strin
 ```
 
 **Detection**:
+
 ```rust
 // Log all IPC calls
 tracing::info!(
@@ -101,6 +107,7 @@ tracing::info!(
 **Attack Description**: Attacker bypasses filesystem scope restrictions using path traversal sequences to access files outside allowed directories.
 
 **Attack Flow**:
+
 ```
 1. Application allows read access to $APPDATA/myapp/*
 2. Attacker requests path: "../../.ssh/id_rsa"
@@ -111,6 +118,7 @@ tracing::info!(
 ```
 
 **Impact**:
+
 - **Confidentiality**: CRITICAL - Access to any user file
 - **Integrity**: HIGH - Can write to any user file
 - **Business Impact**: Credential theft, data exfiltration
@@ -147,6 +155,7 @@ fn validate_path(base: &PathBuf, user_path: &str) -> Result<PathBuf, Error> {
 ```
 
 **Testing**:
+
 ```rust
 #[test]
 fn test_path_traversal_variants() {
@@ -178,6 +187,7 @@ fn test_path_traversal_variants() {
 **Attack Description**: Attacker compromises update server or performs MitM to deliver malicious application update.
 
 **Attack Flow**:
+
 ```
 1. Attacker compromises update server or DNS
 2. Application checks for updates
@@ -188,6 +198,7 @@ fn test_path_traversal_variants() {
 ```
 
 **Impact**:
+
 - **Confidentiality**: CRITICAL - Full system access
 - **Integrity**: CRITICAL - Persistent malware
 - **Availability**: CRITICAL - Ransomware potential
@@ -214,11 +225,12 @@ let updater = app.updater_builder()
 ```typescript
 // Protect private keys - vite.config.ts
 export default {
-    envPrefix: ['VITE_']  // NOT ['VITE_', 'TAURI_']
-}
+  envPrefix: ["VITE_"], // NOT ['VITE_', 'TAURI_']
+};
 ```
 
 **Key Management**:
+
 - Store private key in secure vault (not in repo)
 - Rotate keys annually
 - Use HSM for production signing
@@ -235,6 +247,7 @@ export default {
 **Attack Description**: Malicious iFrame from remote origin bypasses Tauri API access controls to invoke commands.
 
 **Attack Flow**:
+
 ```
 1. Application embeds content with dangerousRemoteDomainIpcAccess
 2. Attacker controls or compromises allowed remote domain
@@ -245,6 +258,7 @@ export default {
 ```
 
 **Impact**:
+
 - **Confidentiality**: HIGH - Access to IPC commands
 - **Integrity**: HIGH - Can invoke state-changing commands
 - **Business Impact**: Unauthorized access to system resources
@@ -292,6 +306,7 @@ async fn sensitive_command(window: Window) -> Result<(), String> {
 **Attack Description**: Attacker exploits shell execution capability to run arbitrary system commands.
 
 **Attack Flow**:
+
 ```
 1. Application has shell:allow-execute capability
 2. User input passed to shell command
@@ -302,6 +317,7 @@ async fn sensitive_command(window: Window) -> Result<(), String> {
 ```
 
 **Impact**:
+
 - **Confidentiality**: CRITICAL - Can read any file
 - **Integrity**: CRITICAL - Can modify/delete any file
 - **Availability**: CRITICAL - Can destroy system
@@ -374,32 +390,35 @@ fn open_url(url: &str) -> Result<(), Error> {
 
 ## STRIDE Analysis
 
-| Category | Threats | Mitigations | Priority |
-|----------|---------|-------------|----------|
-| **Spoofing** | Fake origin in IPC, compromised update server | Origin verification, update signatures | CRITICAL |
-| **Tampering** | Modified filesystem paths, injected commands | Path validation, input sanitization | CRITICAL |
-| **Repudiation** | No audit trail for sensitive operations | Log all IPC calls with context | MEDIUM |
-| **Information Disclosure** | Path traversal, verbose errors | Path containment, safe error messages | HIGH |
-| **Denial of Service** | Resource exhaustion via IPC | Rate limiting, input size limits | MEDIUM |
-| **Elevation of Privilege** | Shell injection, capability abuse | Disable shell, minimal capabilities | CRITICAL |
+| Category                   | Threats                                       | Mitigations                            | Priority |
+| -------------------------- | --------------------------------------------- | -------------------------------------- | -------- |
+| **Spoofing**               | Fake origin in IPC, compromised update server | Origin verification, update signatures | CRITICAL |
+| **Tampering**              | Modified filesystem paths, injected commands  | Path validation, input sanitization    | CRITICAL |
+| **Repudiation**            | No audit trail for sensitive operations       | Log all IPC calls with context         | MEDIUM   |
+| **Information Disclosure** | Path traversal, verbose errors                | Path containment, safe error messages  | HIGH     |
+| **Denial of Service**      | Resource exhaustion via IPC                   | Rate limiting, input size limits       | MEDIUM   |
+| **Elevation of Privilege** | Shell injection, capability abuse             | Disable shell, minimal capabilities    | CRITICAL |
 
 ---
 
 ## Security Testing Coverage
 
 ### Automated Testing
+
 - [ ] Path traversal fuzzing on all file operations
 - [ ] IPC command fuzzing with invalid inputs
 - [ ] CSP validation in browser devtools
 - [ ] Dependency scanning with cargo-audit
 
 ### Manual Testing
+
 - [ ] Origin verification bypass attempts
 - [ ] Update mechanism MitM testing
 - [ ] Capability escalation testing
 - [ ] Shell injection in allowed commands
 
 ### Penetration Testing Scope
+
 - [ ] WebView XSS leading to IPC abuse
 - [ ] Filesystem scope escape
 - [ ] Update integrity verification

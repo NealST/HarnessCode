@@ -78,15 +78,15 @@ let x = option.ok_or(Error::MissingValue)?;
 
 ## Decision Guide
 
-| Situation | Use |
-|-----------|-----|
-| User input | `?` with error |
-| File/network I/O | `?` with error |
-| Database operations | `?` with error |
-| Parsed constants | `.expect()` |
-| Thread/mutex operations | `.expect()` |
-| After validation check | `.expect()` with explanation |
-| Never expected to fail | `.expect()` documenting invariant |
+| Situation               | Use                               |
+| ----------------------- | --------------------------------- |
+| User input              | `?` with error                    |
+| File/network I/O        | `?` with error                    |
+| Database operations     | `?` with error                    |
+| Parsed constants        | `.expect()`                       |
+| Thread/mutex operations | `.expect()`                       |
+| After validation check  | `.expect()` with explanation      |
+| Never expected to fail  | `.expect()` documenting invariant |
 
 ## See Also
 

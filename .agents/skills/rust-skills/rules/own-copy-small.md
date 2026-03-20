@@ -53,6 +53,7 @@ let d2 = distance(origin, target); // Still works!
 ## Copy Requirements
 
 A type can implement `Copy` only if:
+
 1. All fields implement `Copy`
 2. No custom `Drop` implementation
 3. No heap-allocated data (`String`, `Vec`, `Box`, etc.)
@@ -85,11 +86,11 @@ impl Drop for FileHandle {
 
 ## Size Guidelines
 
-| Size | Recommendation |
-|------|----------------|
-| ≤ 16 bytes | Implement `Copy` |
+| Size        | Recommendation                         |
+| ----------- | -------------------------------------- |
+| ≤ 16 bytes  | Implement `Copy`                       |
 | 17-64 bytes | Consider `Copy`, benchmark if critical |
-| > 64 bytes | Probably don't, prefer references |
+| > 64 bytes  | Probably don't, prefer references      |
 
 ```rust
 use std::mem::size_of;
@@ -109,6 +110,7 @@ struct Transform {
 ## Common Copy Types
 
 Standard library types that are `Copy`:
+
 - All primitives: `i32`, `f64`, `bool`, `char`, etc.
 - References: `&T`, `&mut T`
 - Raw pointers: `*const T`, `*mut T`

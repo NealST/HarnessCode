@@ -54,8 +54,8 @@ fn process_validated(data: ValidatedData) -> Result<Output, ProcessError> {
 }
 
 // Invariant: type system guarantees
-fn get_first<T>(vec: Vec<T>) -> T 
-where 
+fn get_first<T>(vec: Vec<T>) -> T
+where
     Vec<T>: NonEmpty,  // Hypothetical trait
 {
     vec.into_iter().next()
@@ -66,6 +66,7 @@ where
 ## expect() Message Guidelines
 
 Messages should:
+
 1. Start with "BUG:" or similar to indicate it's an invariant
 2. Explain WHY the invariant should hold
 3. Help developers fix the issue
@@ -95,7 +96,7 @@ impl ValidatedEmail {
         }
         Ok(ValidatedEmail(email.to_string()))
     }
-    
+
     pub fn domain(&self) -> &str {
         // After validation, expect() is fine
         self.0.split('@').nth(1)

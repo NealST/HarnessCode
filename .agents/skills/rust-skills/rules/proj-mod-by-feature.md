@@ -54,13 +54,13 @@ src/
 
 ## Benefits
 
-| Aspect | Type-Based | Feature-Based |
-|--------|------------|---------------|
-| Finding code | Search across folders | One folder per feature |
-| Adding feature | Touch 4+ folders | Create one folder |
-| Understanding feature | Jump between folders | Everything in one place |
-| Deleting feature | Hunt through codebase | Delete one folder |
-| Code ownership | Unclear | Clear feature owners |
+| Aspect                | Type-Based            | Feature-Based           |
+| --------------------- | --------------------- | ----------------------- |
+| Finding code          | Search across folders | One folder per feature  |
+| Adding feature        | Touch 4+ folders      | Create one folder       |
+| Understanding feature | Jump between folders  | Everything in one place |
+| Deleting feature      | Hunt through codebase | Delete one folder       |
+| Code ownership        | Unclear               | Clear feature owners    |
 
 ## Module Structure
 

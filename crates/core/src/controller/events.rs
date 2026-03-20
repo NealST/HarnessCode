@@ -11,6 +11,43 @@ use serde::{Deserialize, Serialize};
 pub enum PipelineEvent {
     /// An agent stage has started — show a "thinking" indicator.
     StageStarted { role: AgentRole },
+    /// The Judge decided how to route the current request.
+    JudgeReady {
+        route: String,
+        route_reason_code: String,
+        ready_for_scoper: bool,
+        ready_for_planner: bool,
+        ask_user_clarification: bool,
+        effective_request: String,
+        goal_is_concrete: bool,
+        constraints_are_stable: bool,
+        history_resolves_references: bool,
+        repository_grounding_needed: bool,
+        prior_scope_can_be_reused: bool,
+        skip_scoper_criteria_met: Vec<String>,
+        missing_information: Vec<String>,
+        clarifying_questions: Vec<String>,
+        confidence: String,
+    },
+    /// The Scoper finished framing the user's request.
+    ScopeReady {
+        task_type: String,
+        objective: String,
+        in_scope: Vec<String>,
+        out_of_scope: Vec<String>,
+        unknowns: Vec<String>,
+        success_criteria: Vec<String>,
+        relevant_files: Vec<String>,
+        needs_user_clarification: bool,
+        clarifying_questions: Vec<String>,
+        confidence: String,
+    },
+    /// The pipeline is paused while waiting for the user to answer clarification questions.
+    ClarificationRequested {
+        source: AgentRole,
+        objective: String,
+        questions: Vec<String>,
+    },
     /// The Planner produced an execution plan.
     ///
     /// Emitted immediately after [`StageCompleted`] for the Planner so that

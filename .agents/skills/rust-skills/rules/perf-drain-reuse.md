@@ -12,7 +12,7 @@
 // Allocates new Vec every iteration
 fn process_batches(data: Vec<Item>) {
     let mut remaining = data;
-    
+
     while !remaining.is_empty() {
         let batch: Vec<_> = remaining.drain(..100.min(remaining.len())).collect();
         process_batch(batch);
@@ -37,7 +37,7 @@ fn reuse_buffer() {
 // Reuses allocation with drain
 fn process_batches(mut data: Vec<Item>) {
     let mut batch = Vec::with_capacity(100);
-    
+
     while !data.is_empty() {
         batch.extend(data.drain(..100.min(data.len())));
         process_batch(&batch);
@@ -48,7 +48,7 @@ fn process_batches(mut data: Vec<Item>) {
 // Reuses buffer across iterations
 fn reuse_buffer() {
     let mut buffer = Vec::new();
-    
+
     for _ in 0..1000 {
         buffer.clear();  // Keeps capacity
         fill_buffer(&mut buffer);
@@ -59,14 +59,14 @@ fn reuse_buffer() {
 
 ## Drain Methods
 
-| Collection | Method | Behavior |
-|------------|--------|----------|
-| `Vec<T>` | `.drain(range)` | Remove range, shift remaining |
-| `Vec<T>` | `.drain(..)` | Remove all (like clear) |
-| `VecDeque<T>` | `.drain(range)` | Remove range |
-| `String` | `.drain(range)` | Remove char range |
-| `HashMap<K,V>` | `.drain()` | Remove all entries |
-| `HashSet<T>` | `.drain()` | Remove all elements |
+| Collection     | Method          | Behavior                      |
+| -------------- | --------------- | ----------------------------- |
+| `Vec<T>`       | `.drain(range)` | Remove range, shift remaining |
+| `Vec<T>`       | `.drain(..)`    | Remove all (like clear)       |
+| `VecDeque<T>`  | `.drain(range)` | Remove range                  |
+| `String`       | `.drain(range)` | Remove char range             |
+| `HashMap<K,V>` | `.drain()`      | Remove all entries            |
+| `HashSet<T>`   | `.drain()`      | Remove all elements           |
 
 ## Pattern: Batch Processing
 
@@ -111,10 +111,10 @@ fn process_and_clear(map: &mut HashMap<String, Value>) {
 
 ## drain vs clear vs take
 
-| Operation | Elements | Capacity | Returns |
-|-----------|----------|----------|---------|
-| `.clear()` | Removed | Kept | Nothing |
-| `.drain(..)` | Removed | Kept | Iterator |
+| Operation          | Elements  | Capacity   | Returns          |
+| ------------------ | --------- | ---------- | ---------------- |
+| `.clear()`         | Removed   | Kept       | Nothing          |
+| `.drain(..)`       | Removed   | Kept       | Iterator         |
 | `std::mem::take()` | Moved out | Reset to 0 | Owned collection |
 
 ```rust

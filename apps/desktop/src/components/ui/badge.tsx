@@ -7,13 +7,13 @@ const badgeVariants = cva(
   {
     variants: {
       variant: {
-        default:     "bg-primary text-primary-foreground",
-        secondary:   "bg-secondary text-secondary-foreground",
+        default: "bg-primary text-primary-foreground",
+        secondary: "bg-secondary text-secondary-foreground",
         destructive: "bg-destructive text-destructive-foreground",
-        outline:     "border border-border text-foreground",
-        success:     "bg-green-900/60 text-green-300 border border-green-800",
-        warning:     "bg-yellow-900/60 text-yellow-300 border border-yellow-800",
-        running:     "bg-brand-900/60 text-brand-300 border border-brand-800",
+        outline: "border border-border text-foreground",
+        success: "bg-green-900/60 text-green-300 border border-green-800",
+        warning: "bg-yellow-900/60 text-yellow-300 border border-yellow-800",
+        running: "bg-brand-900/60 text-brand-300 border border-brand-800",
       },
     },
     defaultVariants: { variant: "default" },
@@ -21,11 +21,14 @@ const badgeVariants = cva(
 );
 
 export interface BadgeProps
-  extends React.HTMLAttributes<HTMLDivElement>,
+  extends
+    React.HTMLAttributes<HTMLDivElement>,
     VariantProps<typeof badgeVariants> {}
 
 function Badge({ className, variant, ...props }: BadgeProps) {
-  return <div className={cn(badgeVariants({ variant }), className)} {...props} />;
+  return (
+    <div className={cn(badgeVariants({ variant }), className)} {...props} />
+  );
 }
 
 export { Badge, badgeVariants };

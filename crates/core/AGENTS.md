@@ -38,4 +38,3 @@ core/
 ## Code style & conventions
 
 - Follow idiomatic Rust (clippy clean, `rustfmt` formatted).
-

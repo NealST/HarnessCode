@@ -13,10 +13,10 @@ enum Message {
     Quit,                              // 0 bytes of data
     Move { x: i32, y: i32 },          // 8 bytes
     Text(String),                      // 24 bytes
-    Image { 
+    Image {
         data: [u8; 1024],             // 1024 bytes - forces entire enum to ~1032 bytes!
-        width: u32, 
-        height: u32 
+        width: u32,
+        height: u32
     },
 }
 
@@ -47,7 +47,7 @@ enum Message {
 // Message is now ~32 bytes (String variant is largest)
 let messages: Vec<Message> = vec![
     Message::Quit,  // Uses ~32 bytes
-    Message::Quit,  // Uses ~32 bytes  
+    Message::Quit,  // Uses ~32 bytes
     Message::Move { x: 0, y: 0 },  // Uses ~32 bytes
 ];
 ```
@@ -89,11 +89,11 @@ large_enum_variant = "warn"  # Warns when variants differ significantly
 
 ## When to Box
 
-| Largest Variant | Other Variants | Action |
-|-----------------|----------------|--------|
-| < 64 bytes | Similar size | Don't box |
-| > 128 bytes | Much smaller | Box the large variant |
-| > 256 bytes | Any | Definitely box |
+| Largest Variant | Other Variants | Action                |
+| --------------- | -------------- | --------------------- |
+| < 64 bytes      | Similar size   | Don't box             |
+| > 128 bytes     | Much smaller   | Box the large variant |
+| > 256 bytes     | Any            | Definitely box        |
 
 ## Recursive Types Require Boxing
 

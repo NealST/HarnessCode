@@ -12,7 +12,7 @@ Panics unwind the stack and crash the thread (or program). They're unrecoverable
 fn parse_config(path: &str) -> Config {
     let content = std::fs::read_to_string(path)
         .expect("Failed to read config");  // Crashes on missing file
-    
+
     serde_json::from_str(&content)
         .expect("Invalid config format")   // Crashes on bad JSON
 }
@@ -93,17 +93,17 @@ fn main() {
 
 ## Panic vs Result Decision Guide
 
-| Situation | Use |
-|-----------|-----|
-| File not found | `Result` |
-| Network error | `Result` |
-| Invalid user input | `Result` |
-| Parse error | `Result` |
-| Index out of bounds (from user data) | `Result` |
-| Index out of bounds (internal bug) | Panic |
-| Violated internal invariant | Panic |
-| Unimplemented code path | Panic (`unimplemented!()`) |
-| Impossible state reached | Panic (`unreachable!()`) |
+| Situation                            | Use                        |
+| ------------------------------------ | -------------------------- |
+| File not found                       | `Result`                   |
+| Network error                        | `Result`                   |
+| Invalid user input                   | `Result`                   |
+| Parse error                          | `Result`                   |
+| Index out of bounds (from user data) | `Result`                   |
+| Index out of bounds (internal bug)   | Panic                      |
+| Violated internal invariant          | Panic                      |
+| Unimplemented code path              | Panic (`unimplemented!()`) |
+| Impossible state reached             | Panic (`unreachable!()`)   |
 
 ## Library vs Application
 

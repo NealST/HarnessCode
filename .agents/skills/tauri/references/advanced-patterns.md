@@ -40,9 +40,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 {
   "identifier": "my-plugin:default",
   "description": "Default permissions for my-plugin",
-  "permissions": [
-    "my-plugin:allow-safe-command"
-  ]
+  "permissions": ["my-plugin:allow-safe-command"]
 }
 ```
 
@@ -191,12 +189,12 @@ async fn stream_data(channel: Channel<DataChunk>) -> Result<(), String> {
 
 ```typescript
 // Frontend: Batch multiple operations
-const results = await invoke('batch_operations', {
-    operations: [
-        { type: 'read', path: 'file1.txt' },
-        { type: 'read', path: 'file2.txt' },
-        { type: 'write', path: 'file3.txt', content: '...' }
-    ]
+const results = await invoke("batch_operations", {
+  operations: [
+    { type: "read", path: "file1.txt" },
+    { type: "read", path: "file2.txt" },
+    { type: "write", path: "file3.txt", content: "..." },
+  ],
 });
 ```
 
@@ -250,17 +248,17 @@ mod tests {
 
 ```typescript
 // tests/e2e/app.spec.ts
-import { test, expect } from '@playwright/test';
+import { test, expect } from "@playwright/test";
 
-test('secure operation requires valid input', async ({ page }) => {
-    await page.goto('tauri://localhost');
+test("secure operation requires valid input", async ({ page }) => {
+  await page.goto("tauri://localhost");
 
-    // Try invalid input
-    await page.fill('#input', '../../../etc/passwd');
-    await page.click('#submit');
+  // Try invalid input
+  await page.fill("#input", "../../../etc/passwd");
+  await page.click("#submit");
 
-    // Should show error
-    await expect(page.locator('.error')).toContainText('Invalid path');
+  // Should show error
+  await expect(page.locator(".error")).toContainText("Invalid path");
 });
 ```
 

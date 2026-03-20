@@ -12,7 +12,10 @@ use harnesscode_core::{
         DriftCallback, DriftDecision, DriftSignal,
     },
     config::{default_provider, load_config, user_config_path, HarnessConfig, ProfileConfig},
-    controller::{Controller, PipelineEvent},
+    controller::{
+        ClarificationCallback, ClarificationRequest, ClarificationResolution, Controller,
+        PipelineEvent, RequestContext,
+    },
     observability::{CompositeSink, JsonLinesSink, SpanSink},
 };
 use std::{path::PathBuf, sync::Arc};
@@ -30,10 +33,13 @@ pub async fn start_pipeline(
     app: AppHandle,
     state: State<'_, PipelineState>,
     prompt: String,
+    request_context: Option<RequestContext>,
     project_dir: Option<String>,
     max_tool_turns: Option<usize>,
 ) -> Result<(), String> {
     info!(prompt = %prompt, "start_pipeline invoked");
+
+    let request_context = request_context.unwrap_or_else(|| RequestContext::from_prompt(prompt.clone()));
 
     let llm = default_provider().map_err(|e| e.to_string())?;
 
@@ -93,6 +99,23 @@ pub async fn start_pipeline(
         })
     });
 
+    let clarification_app = app.clone();
+    let clarification_callback: ClarificationCallback = Arc::new(move |_request: ClarificationRequest| {
+        let app = clarification_app.clone();
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::oneshot::channel::<ClarificationResolution>();
+            {
+                let state = app.state::<PipelineState>();
+                *state.clarification_tx.lock().await = Some(tx);
+            }
+
+            tokio::time::timeout(std::time::Duration::from_secs(600), rx)
+                .await
+                .unwrap_or(Ok(ClarificationResolution::Abort))
+                .unwrap_or(ClarificationResolution::Abort)
+        })
+    });
+
     // Cancellation channel (best-effort; the pipeline checks for timeout guardrails).
     let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel::<()>();
     *state.cancel_tx.lock().await = Some(cancel_tx);
@@ -114,7 +137,14 @@ pub async fn start_pipeline(
             })
         };
 
-        let result = controller.run_with_progress(&prompt, Some(tx), Some(drift_callback)).await;
+        let result = controller
+            .run_with_request_context(
+                &request_context,
+                Some(tx),
+                Some(drift_callback),
+                Some(clarification_callback),
+            )
+            .await;
         let _ = forwarder.await;
 
         let done = match result {
@@ -281,6 +311,22 @@ pub async fn submit_drift_decision(
     };
     if let Some(tx) = state.drift_decision_tx.lock().await.take() {
         let _ = tx.send(d);
+    }
+    Ok(())
+}
+
+/// Resolve a pending clarification prompt with a freeform user response.
+#[tauri::command]
+pub async fn submit_clarification_response(
+    state: State<'_, PipelineState>,
+    response: Option<String>,
+) -> Result<(), String> {
+    let resolution = match response {
+        Some(value) if !value.trim().is_empty() => ClarificationResolution::Answer(value),
+        _ => ClarificationResolution::Abort,
+    };
+    if let Some(tx) = state.clarification_tx.lock().await.take() {
+        let _ = tx.send(resolution);
     }
     Ok(())
 }

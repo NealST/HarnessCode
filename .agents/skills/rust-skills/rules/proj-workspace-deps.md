@@ -14,7 +14,7 @@ Multi-crate workspaces often have dependency version drift—different crates us
 serde = "1.0.150"
 tokio = "1.25"
 
-# crate-b/Cargo.toml  
+# crate-b/Cargo.toml
 [dependencies]
 serde = "1.0.188"  # Different version!
 tokio = "1.32"     # Different version!

@@ -18,7 +18,7 @@ power of modern large language models, giving teams a coding agent that is:
   outcomes, and corrects course automatically.
 - **Token-efficient** — a multi-agent pipeline (Planner → Coder → Reviewer) keeps context windows
   small and focused.
-- **Dual-UX** — ships as a beautiful TUI/CLI *and* as a native desktop app powered by Tauri v2 with
+- **Dual-UX** — ships as a beautiful TUI/CLI _and_ as a native desktop app powered by Tauri v2 with
   a Generative UI (React + TypeScript + TailwindCSS).
 
 ---
@@ -127,19 +127,19 @@ HarnessCode implements a classic **TOTE** (Test-Operate-Test-Exit) cybernetic lo
 
 Every file touched by HarnessCode is run through the `RiskManager`:
 
-| Risk Level | Trigger | Action |
-|------------|---------|--------|
-| `Low`      | General source files | Auto-proceed |
-| `Medium`   | Config files, CI scripts | Log a warning |
+| Risk Level | Trigger                           | Action           |
+| ---------- | --------------------------------- | ---------------- |
+| `Low`      | General source files              | Auto-proceed     |
+| `Medium`   | Config files, CI scripts          | Log a warning    |
 | `High`     | Auth files, secrets, `Cargo.toml` | Block + ask user |
 
 ### Multi-Agent Collaboration
 
-| Agent     | Responsibility |
-|-----------|---------------|
-| Planner   | Decomposes the task into atomic steps, maintains the `agents.md` context file |
-| Coder     | Generates and applies code changes in an isolated sandbox |
-| Reviewer  | Runs tests, linting, security scans, and decides pass/fail |
+| Agent    | Responsibility                                                                |
+| -------- | ----------------------------------------------------------------------------- |
+| Planner  | Decomposes the task into atomic steps, maintains the `agents.md` context file |
+| Coder    | Generates and applies code changes in an isolated sandbox                     |
+| Reviewer | Runs tests, linting, security scans, and decides pass/fail                    |
 
 ---
 
@@ -177,7 +177,7 @@ HarnessCode/
 ### Prerequisites
 
 - [Rust 1.75+](https://rustup.rs/)
-- [Node.js 18+](https://nodejs.org/) *(for the desktop app)*
+- [Node.js 18+](https://nodejs.org/) _(for the desktop app)_
 - [Tauri v2 prerequisites](https://tauri.app/start/prerequisites/)
 
 ### Run the CLI

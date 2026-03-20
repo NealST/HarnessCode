@@ -8,11 +8,11 @@ Consistent naming helps users understand API cost. `as_` prefix signals a free (
 
 ## The Convention
 
-| Prefix | Cost | Ownership | Example |
-|--------|------|-----------|---------|
-| `as_` | Free | `&T -> &U` | `str::as_bytes()` |
-| `to_` | Expensive | `&T -> U` | `str::to_lowercase()` |
-| `into_` | Variable | `T -> U` | `String::into_bytes()` |
+| Prefix  | Cost      | Ownership  | Example                |
+| ------- | --------- | ---------- | ---------------------- |
+| `as_`   | Free      | `&T -> &U` | `str::as_bytes()`      |
+| `to_`   | Expensive | `&T -> U`  | `str::to_lowercase()`  |
+| `into_` | Variable  | `T -> U`   | `String::into_bytes()` |
 
 ## Examples
 
@@ -22,7 +22,7 @@ impl MyString {
     pub fn as_str(&self) -> &str {
         &self.inner
     }
-    
+
     pub fn as_bytes(&self) -> &[u8] {
         self.inner.as_bytes()
     }
@@ -33,7 +33,7 @@ impl Wrapper<T> {
     pub fn as_inner(&self) -> &T {
         &self.inner
     }
-    
+
     pub fn as_inner_mut(&mut self) -> &mut T {
         &mut self.inner
     }
@@ -69,7 +69,7 @@ impl MyType {
     pub fn as_string(&self) -> String {
         format!("{}", self.value)  // Allocates! Should be to_string()
     }
-    
+
     // BAD: as_ but expensive
     pub fn as_processed(&self) -> &ProcessedData {
         // Actually does expensive computation
@@ -85,12 +85,12 @@ impl MyType {
     pub fn as_str(&self) -> &str {
         &self.inner
     }
-    
+
     // GOOD: to_ signals allocation
     pub fn to_string(&self) -> String {
         format!("{}", self.value)
     }
-    
+
     // GOOD: into_ signals ownership transfer
     pub fn into_inner(self) -> Inner {
         self.inner

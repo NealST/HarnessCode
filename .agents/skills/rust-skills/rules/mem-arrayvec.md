@@ -55,11 +55,11 @@ fn collect_readings() -> ArrayVec<SensorReading, 16> {
 
 ## ArrayVec vs SmallVec vs Vec
 
-| Type | Stack | Heap | Use When |
-|------|-------|------|----------|
-| `Vec<T>` | Never | Always | Unknown size, may grow indefinitely |
-| `SmallVec<[T; N]>` | Up to N | Beyond N | Usually small, occasionally large |
-| `ArrayVec<T, N>` | Always | Never | Hard limit, no heap allowed |
+| Type               | Stack   | Heap     | Use When                            |
+| ------------------ | ------- | -------- | ----------------------------------- |
+| `Vec<T>`           | Never   | Always   | Unknown size, may grow indefinitely |
+| `SmallVec<[T; N]>` | Up to N | Beyond N | Usually small, occasionally large   |
+| `ArrayVec<T, N>`   | Always  | Never    | Hard limit, no heap allowed         |
 
 ## API Patterns
 

@@ -18,12 +18,16 @@ use harnesscode_core::{
         load_config, project_config_path, user_config_path,
         HarnessConfig, ProfileConfig, PROJECT_CONFIG_FILE,
     },
-    controller::{Controller, PipelineEvent},
+    controller::{
+        ClarificationCallback, ClarificationRequest, ClarificationResolution, Controller,
+        PipelineEvent, RequestContext,
+    },
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::{Confirm, Select, Text};
 use std::{collections::HashMap, time::Duration};
 use tracing::{error, info};
+use std::sync::Arc;
 
 // ──────────────────────────────────────────────
 // CLI argument structure
@@ -360,8 +364,39 @@ fn print_pipeline_result(outputs: &[AgentOutput]) {
             if output.summary.starts_with("[HIGH]") { "🚨" }
             else if output.summary.starts_with("[MEDIUM]") { "⚠️" }
             else { "✅" }
+        } else if output.role == AgentRole::Judge {
+            "⚖️"
+        } else if output.role == AgentRole::Scoper {
+            "🧭"
         } else if output.success { "✅" } else { "❌" };
         println!("  {icon}  [{:<8}]  {}", output.role.to_string(), output.summary);
+
+        if output.role == AgentRole::Judge {
+            if let Some(effective_request) = output.payload.get("effective_request").and_then(|v| v.as_str()) {
+                println!("        Effective request: {effective_request}");
+            }
+            if let Some(questions) = output.payload.get("clarifying_questions").and_then(|v| v.as_array()) {
+                for question in questions.iter().filter_map(|v| v.as_str()) {
+                    println!("        ? {question}");
+                }
+            }
+        }
+
+        if output.role == AgentRole::Scoper {
+            if let Some(objective) = output.payload.get("objective").and_then(|v| v.as_str()) {
+                println!("        Objective: {objective}");
+            }
+            if let Some(criteria) = output.payload.get("success_criteria").and_then(|v| v.as_array()) {
+                for criterion in criteria.iter().filter_map(|v| v.as_str()) {
+                    println!("        • {criterion}");
+                }
+            }
+            if let Some(questions) = output.payload.get("clarifying_questions").and_then(|v| v.as_array()) {
+                for question in questions.iter().filter_map(|v| v.as_str()) {
+                    println!("        ? {question}");
+                }
+            }
+        }
 
         // ── Planner: show numbered steps if present ──────────────────────────
         if output.role == AgentRole::Planner {
@@ -430,6 +465,11 @@ fn print_pipeline_result(outputs: &[AgentOutput]) {
         if output.role == AgentRole::Reviewer {
             let verdict_colour = if output.success { "\x1b[32m" } else { "\x1b[31m" };
             println!("        {verdict_colour}Verdict: {}\x1b[0m", output.summary);
+
+            let criteria_met = output.payload.get("criteria_met").and_then(|v| v.as_bool()).unwrap_or(true);
+            let criteria_icon = if criteria_met { "\x1b[32m✅" } else { "\x1b[31m❌" };
+            println!("        {criteria_icon}  Success criteria met\x1b[0m");
+
             if let Some(issues) = output.payload.get("issues").and_then(|i| i.as_array()) {
                 if !issues.is_empty() {
                     println!("        Issues:");
@@ -526,13 +566,41 @@ async fn main() {
     // Spawn the pipeline on a separate task; receive progress events on this thread.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(16);
     let task_clone = task.clone();
+    let clarification_callback: ClarificationCallback = Arc::new(move |request: ClarificationRequest| {
+        Box::pin(async move {
+            let prompt = format!(
+                "{} needs clarification:\n{}\n\nAnswer:",
+                request.source,
+                request.questions.join("\n- ")
+            );
+            match tokio::task::spawn_blocking(move || {
+                Text::new(&prompt)
+                    .with_placeholder("Provide the missing detail, or leave blank to abort")
+                    .prompt()
+            })
+            .await
+            {
+                Ok(Ok(answer)) if !answer.trim().is_empty() => ClarificationResolution::Answer(answer),
+                _ => ClarificationResolution::Abort,
+            }
+        })
+    });
     let pipeline = tokio::spawn(async move {
-        controller.run_with_progress(&task_clone, Some(tx), None).await
+        controller
+            .run_with_request_context(
+                &RequestContext::from_prompt(task_clone),
+                Some(tx),
+                None,
+                Some(clarification_callback),
+            )
+            .await
     });
 
     // Label/icon for each agent role.
     fn stage_label(role: AgentRole) -> (&'static str, &'static str) {
         match role {
+            AgentRole::Judge    => ("⚖️", "Judge   "),
+            AgentRole::Scoper   => ("🧭", "Scoper  "),
             AgentRole::Planner  => ("🧠", "Planner "),
             AgentRole::Coder    => ("💻", "Coder   "),
             AgentRole::Risk     => ("🛡️", "Risk    "),
@@ -575,6 +643,94 @@ async fn main() {
                         ));
                     }
                 }
+            }
+            PipelineEvent::JudgeReady {
+                route,
+                route_reason_code,
+                effective_request,
+                goal_is_concrete,
+                constraints_are_stable,
+                history_resolves_references,
+                repository_grounding_needed,
+                prior_scope_can_be_reused,
+                skip_scoper_criteria_met,
+                ready_for_scoper,
+                ready_for_planner,
+                ask_user_clarification,
+                clarifying_questions,
+                ..
+            } => {
+                println!("\n  ⚖️  Judge Decision\n");
+                println!("    Effective request: {effective_request}");
+                println!("    Route: {route} ({route_reason_code})");
+                println!(
+                    "    Flags: planner={} scoper={} clarify={}",
+                    ready_for_planner,
+                    ready_for_scoper,
+                    ask_user_clarification,
+                );
+                println!(
+                    "    Criteria: goal_concrete={} constraints_stable={} history_resolves_refs={} repo_grounding_needed={} prior_scope_reusable={}",
+                    goal_is_concrete,
+                    constraints_are_stable,
+                    history_resolves_references,
+                    repository_grounding_needed,
+                    prior_scope_can_be_reused,
+                );
+                for criterion in &skip_scoper_criteria_met {
+                    println!("    • skip scoper: {criterion}");
+                }
+                for question in &clarifying_questions {
+                    println!("    ? {question}");
+                }
+                println!();
+            }
+            PipelineEvent::ScopeReady {
+                task_type,
+                objective,
+                unknowns,
+                success_criteria,
+                relevant_files,
+                needs_user_clarification,
+                clarifying_questions,
+                ..
+            } => {
+                println!("\n  🧭  Problem Frame  ({})\n", task_type.to_uppercase());
+                println!("    Objective: {objective}");
+                for criterion in &success_criteria {
+                    println!("    • {criterion}");
+                }
+                if !unknowns.is_empty() {
+                    println!("\n  ❓  Unknowns:");
+                    for item in &unknowns {
+                        println!("      • {item}");
+                    }
+                }
+                if needs_user_clarification && !clarifying_questions.is_empty() {
+                    println!("\n  🗣️  Clarifying questions:");
+                    for question in &clarifying_questions {
+                        println!("      ? {question}");
+                    }
+                }
+                if !relevant_files.is_empty() {
+                    println!("\n  📁  Relevant files:");
+                    for file in &relevant_files {
+                        println!("      • {file}");
+                    }
+                }
+                println!();
+            }
+            PipelineEvent::ClarificationRequested {
+                source,
+                objective,
+                questions,
+            } => {
+                println!("\n  ❓  Clarification Requested by {source}\n");
+                println!("    Objective: {objective}");
+                for question in &questions {
+                    println!("    ? {question}");
+                }
+                println!();
             }
             PipelineEvent::PlanReady { steps, affected_files, complexity } => {
                 // The Planner spinner was already finished by StageCompleted.

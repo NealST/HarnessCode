@@ -58,13 +58,13 @@ feature-a = []  # Feature name matches crate name
 
 ## Notable Lints
 
-| Lint | Issue |
-|------|-------|
-| `cargo_common_metadata` | Missing description/license/repository |
-| `multiple_crate_versions` | Same crate at different versions |
-| `negative_feature_names` | Features like `no-std` instead of `std` |
-| `redundant_feature_names` | Feature same as crate name |
-| `wildcard_dependencies` | Using `*` for version |
+| Lint                      | Issue                                   |
+| ------------------------- | --------------------------------------- |
+| `cargo_common_metadata`   | Missing description/license/repository  |
+| `multiple_crate_versions` | Same crate at different versions        |
+| `negative_feature_names`  | Features like `no-std` instead of `std` |
+| `redundant_feature_names` | Feature same as crate name              |
+| `wildcard_dependencies`   | Using `*` for version                   |
 
 ## Complete Cargo.toml
 

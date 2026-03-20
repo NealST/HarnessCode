@@ -85,13 +85,13 @@ thread::spawn(move || use_data(shared));
 
 ## Alternatives to Clone
 
-| Instead of | Use |
-|------------|-----|
-| `s.clone()` for reading | `&s` |
-| `vec.clone()` for iteration | `&vec` or `vec.iter()` |
-| `Clone` for shared ownership | `Arc<T>` |
-| Clone in hot loop | Move outside loop |
-| `s.to_string()` from `&str` | Accept `&str` if possible |
+| Instead of                   | Use                       |
+| ---------------------------- | ------------------------- |
+| `s.clone()` for reading      | `&s`                      |
+| `vec.clone()` for iteration  | `&vec` or `vec.iter()`    |
+| `Clone` for shared ownership | `Arc<T>`                  |
+| Clone in hot loop            | Move outside loop         |
+| `s.to_string()` from `&str`  | Accept `&str` if possible |
 
 ## Pattern: Clone on Write
 

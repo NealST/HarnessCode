@@ -98,15 +98,15 @@ fn test_fails() {
 
 ## Decision Guide
 
-| Condition | Action |
-|-----------|--------|
-| Invalid user input | Return `Err` |
-| Network failure | Return `Err` |
-| File not found | Return `Err` |
-| Malformed data | Return `Err` |
-| Bug/impossible state | `panic!` or `unreachable!` |
-| Failed assertion in test | `panic!` |
-| Unrecoverable init failure | `panic!` |
+| Condition                  | Action                     |
+| -------------------------- | -------------------------- |
+| Invalid user input         | Return `Err`               |
+| Network failure            | Return `Err`               |
+| File not found             | Return `Err`               |
+| Malformed data             | Return `Err`               |
+| Bug/impossible state       | `panic!` or `unreachable!` |
+| Failed assertion in test   | `panic!`                   |
+| Unrecoverable init failure | `panic!`                   |
 
 ## Anti-pattern: panic! for Control Flow
 

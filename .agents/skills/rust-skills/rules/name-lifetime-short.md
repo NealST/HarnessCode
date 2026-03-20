@@ -39,15 +39,15 @@ fn deserialize<'de>(input: &'de [u8]) -> Result<Value<'de>, Error> { ... }
 
 ## Common Lifetime Conventions
 
-| Lifetime | Convention | Example |
-|----------|------------|---------|
-| `'a` | Generic, first lifetime | `fn foo<'a>(x: &'a str)` |
-| `'b` | Generic, second lifetime | `fn bar<'a, 'b>(x: &'a T, y: &'b U)` |
-| `'de` | Deserialization | serde's `Deserialize<'de>` |
-| `'src` | Source code/input | `struct Lexer<'src>` |
-| `'ctx` | Context | `struct Query<'ctx>` |
-| `'input` | Input data | `struct Parser<'input>` |
-| `'static` | Static lifetime | `&'static str` |
+| Lifetime  | Convention               | Example                              |
+| --------- | ------------------------ | ------------------------------------ |
+| `'a`      | Generic, first lifetime  | `fn foo<'a>(x: &'a str)`             |
+| `'b`      | Generic, second lifetime | `fn bar<'a, 'b>(x: &'a T, y: &'b U)` |
+| `'de`     | Deserialization          | serde's `Deserialize<'de>`           |
+| `'src`    | Source code/input        | `struct Lexer<'src>`                 |
+| `'ctx`    | Context                  | `struct Query<'ctx>`                 |
+| `'input`  | Input data               | `struct Parser<'input>`              |
+| `'static` | Static lifetime          | `&'static str`                       |
 
 ## Elision Preferred
 

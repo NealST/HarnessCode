@@ -43,11 +43,11 @@ src/
 
 ## When to Add Structure
 
-| File Count | Structure |
-|------------|-----------|
-| < 10 files | Flat in `src/` |
-| 10-20 files | Group by feature |
-| 20+ files | Feature folders with submodules |
+| File Count  | Structure                       |
+| ----------- | ------------------------------- |
+| < 10 files  | Flat in `src/`                  |
+| 10-20 files | Group by feature                |
+| 20+ files   | Feature folders with submodules |
 
 ## Progressive Structuring
 

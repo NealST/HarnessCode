@@ -15,7 +15,7 @@ pub fn parse(s: &str) -> Result<Foo, Error> {
 }
 
 /// A widget for doing things.
-/// 
+///
 /// This widget is very useful.
 pub struct Widget {
     // Still no examples
@@ -24,7 +24,7 @@ pub struct Widget {
 
 ## Good
 
-```rust
+````rust
 /// Parses a string into a Foo.
 ///
 /// # Examples
@@ -47,11 +47,11 @@ pub struct Widget {
 pub fn parse(s: &str) -> Result<Foo, Error> {
     // ...
 }
-```
+````
 
 ## Use ? Not unwrap()
 
-```rust
+````rust
 /// Loads configuration from a file.
 ///
 /// # Examples
@@ -68,11 +68,11 @@ pub fn parse(s: &str) -> Result<Foo, Error> {
 pub fn load(path: &str) -> Result<Config, Error> {
     // ...
 }
-```
+````
 
 ## Hide Setup Code
 
-```rust
+````rust
 /// Processes items from a database.
 ///
 /// # Examples
@@ -88,11 +88,11 @@ pub fn load(path: &str) -> Result<Config, Error> {
 pub fn process_items(&self) -> Result<Vec<Item>, Error> {
     // ...
 }
-```
+````
 
 ## Multiple Examples
 
-```rust
+````rust
 /// Creates a new buffer with the specified capacity.
 ///
 /// # Examples
@@ -117,11 +117,11 @@ pub fn process_items(&self) -> Result<Vec<Item>, Error> {
 pub fn with_capacity(cap: usize) -> Self {
     // ...
 }
-```
+````
 
 ## Show Error Cases
 
-```rust
+````rust
 /// Divides two numbers.
 ///
 /// # Examples
@@ -142,7 +142,7 @@ pub fn with_capacity(cap: usize) -> Self {
 pub fn divide(a: i32, b: i32) -> Result<i32, MathError> {
     // ...
 }
-```
+````
 
 ## Running Doc Tests
 

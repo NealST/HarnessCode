@@ -33,33 +33,33 @@ opt-level = 3
 
 ## Profile Options
 
-| Option | Values | Effect |
-|--------|--------|--------|
-| `opt-level` | 0-3, "s", "z" | Optimization level |
-| `lto` | false, "thin", "fat" | Link-time optimization |
-| `codegen-units` | 1-256 | Parallel compilation units |
-| `panic` | "unwind", "abort" | Panic behavior |
-| `strip` | true, false, "symbols", "debuginfo" | Binary stripping |
-| `debug` | true, false, 0-2 | Debug info level |
+| Option          | Values                              | Effect                     |
+| --------------- | ----------------------------------- | -------------------------- |
+| `opt-level`     | 0-3, "s", "z"                       | Optimization level         |
+| `lto`           | false, "thin", "fat"                | Link-time optimization     |
+| `codegen-units` | 1-256                               | Parallel compilation units |
+| `panic`         | "unwind", "abort"                   | Panic behavior             |
+| `strip`         | true, false, "symbols", "debuginfo" | Binary stripping           |
+| `debug`         | true, false, 0-2                    | Debug info level           |
 
 ## Optimization Levels
 
-| Level | Description | Use Case |
-|-------|-------------|----------|
-| `0` | No optimization | Debug builds |
-| `1` | Basic optimization | Fast compile |
-| `2` | Most optimizations | Balanced |
-| `3` | All optimizations | Maximum performance |
-| `"s"` | Optimize for size | Embedded |
-| `"z"` | Minimize size | Smallest binary |
+| Level | Description        | Use Case            |
+| ----- | ------------------ | ------------------- |
+| `0`   | No optimization    | Debug builds        |
+| `1`   | Basic optimization | Fast compile        |
+| `2`   | Most optimizations | Balanced            |
+| `3`   | All optimizations  | Maximum performance |
+| `"s"` | Optimize for size  | Embedded            |
+| `"z"` | Minimize size      | Smallest binary     |
 
 ## LTO Options
 
-| Option | Compile Time | Performance | Binary Size |
-|--------|--------------|-------------|-------------|
-| `false` | Fast | Baseline | Larger |
-| `"thin"` | Medium | Good | Smaller |
-| `"fat"` | Slow | Best | Smallest |
+| Option   | Compile Time | Performance | Binary Size |
+| -------- | ------------ | ----------- | ----------- |
+| `false`  | Fast         | Baseline    | Larger      |
+| `"thin"` | Medium       | Good        | Smaller     |
+| `"fat"`  | Slow         | Best        | Smallest    |
 
 ## Custom Profiles
 

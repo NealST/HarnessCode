@@ -84,6 +84,7 @@ data.push(42);
 ```
 
 Benefits of `parking_lot`:
+
 - No poisoning (returns guard directly)
 - Smaller size (1 byte vs 40+ bytes)
 - Better performance under contention
@@ -91,12 +92,12 @@ Benefits of `parking_lot`:
 
 ## When to Use What
 
-| Type | Threading | Overhead | Use Case |
-|------|-----------|----------|----------|
-| `RefCell<T>` | Single | Minimal | Interior mutability, same thread |
-| `Mutex<T>` | Multi | Locking | Shared mutable state across threads |
-| `RwLock<T>` | Multi | Locking | Many readers, few writers |
-| `parking_lot::Mutex` | Multi | Less | Drop-in std::Mutex replacement |
+| Type                 | Threading | Overhead | Use Case                            |
+| -------------------- | --------- | -------- | ----------------------------------- |
+| `RefCell<T>`         | Single    | Minimal  | Interior mutability, same thread    |
+| `Mutex<T>`           | Multi     | Locking  | Shared mutable state across threads |
+| `RwLock<T>`          | Multi     | Locking  | Many readers, few writers           |
+| `parking_lot::Mutex` | Multi     | Less     | Drop-in std::Mutex replacement      |
 
 ## See Also
 

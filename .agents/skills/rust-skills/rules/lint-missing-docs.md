@@ -45,7 +45,7 @@ pub trait Handler {  // WARN: missing documentation for a trait
 
 ## Good
 
-```rust
+````rust
 #![warn(missing_docs)]
 
 //! User management module.
@@ -72,7 +72,7 @@ pub trait Handler {
     /// Handle an incoming request.
     fn handle(&self);
 }
-```
+````
 
 ## Private Items
 
@@ -95,7 +95,7 @@ pub struct Public { }  // WARN - public, needs docs
 pub mod api {
     /// Documented struct.
     pub struct Config { }
-    
+
     #[allow(missing_docs)]
     pub mod internal {
         // Internal API, docs not required
@@ -138,14 +138,14 @@ workspace = true
 
 ## What to Document
 
-| Item | Doc Focus |
-|------|-----------|
-| Structs | Purpose, usage example |
-| Struct fields | What it represents |
-| Enums | When to use each variant |
-| Functions | What it does, params, return |
-| Traits | Contract and expectations |
-| Modules | What the module provides |
+| Item          | Doc Focus                    |
+| ------------- | ---------------------------- |
+| Structs       | Purpose, usage example       |
+| Struct fields | What it represents           |
+| Enums         | When to use each variant     |
+| Functions     | What it does, params, return |
+| Traits        | Contract and expectations    |
+| Modules       | What the module provides     |
 
 ## See Also
 

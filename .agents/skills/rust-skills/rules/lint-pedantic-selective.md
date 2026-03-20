@@ -31,27 +31,27 @@ must_use_candidate = "allow"      # Too many suggestions
 
 ## Recommended Pedantic Lints
 
-| Lint | Why Enable |
-|------|-----------|
-| `doc_markdown` | Catch unmarked code in docs |
-| `match_wildcard_for_single_variants` | Explicit variant matching |
-| `semicolon_if_nothing_returned` | Consistent semicolons |
-| `string_add_assign` | Use `+=` for string concatenation |
-| `unnested_or_patterns` | Simplify match patterns |
-| `unused_self` | Catch methods that should be functions |
-| `used_underscore_binding` | Warn on using `_var` |
-| `wildcard_imports` | Avoid glob imports |
+| Lint                                 | Why Enable                             |
+| ------------------------------------ | -------------------------------------- |
+| `doc_markdown`                       | Catch unmarked code in docs            |
+| `match_wildcard_for_single_variants` | Explicit variant matching              |
+| `semicolon_if_nothing_returned`      | Consistent semicolons                  |
+| `string_add_assign`                  | Use `+=` for string concatenation      |
+| `unnested_or_patterns`               | Simplify match patterns                |
+| `unused_self`                        | Catch methods that should be functions |
+| `used_underscore_binding`            | Warn on using `_var`                   |
+| `wildcard_imports`                   | Avoid glob imports                     |
 
 ## Often Disabled
 
-| Lint | Why Disable |
-|------|-------------|
-| `missing_errors_doc` | Handle with `#[doc]` policy |
-| `missing_panics_doc` | Handle with `#[doc]` policy |
-| `module_name_repetitions` | Sometimes intentional |
-| `must_use_candidate` | Too aggressive |
-| `too_many_lines` | Arbitrary threshold |
-| `struct_excessive_bools` | Valid for config structs |
+| Lint                      | Why Disable                 |
+| ------------------------- | --------------------------- |
+| `missing_errors_doc`      | Handle with `#[doc]` policy |
+| `missing_panics_doc`      | Handle with `#[doc]` policy |
+| `module_name_repetitions` | Sometimes intentional       |
+| `must_use_candidate`      | Too aggressive              |
+| `too_many_lines`          | Arbitrary threshold         |
+| `struct_excessive_bools`  | Valid for config structs    |
 
 ## Full Configuration
 

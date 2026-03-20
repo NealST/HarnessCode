@@ -10,7 +10,7 @@ Rust doctests wrap examples in a function that returns `Result<(), E>` by defaul
 
 ## Bad
 
-```rust
+````rust
 /// Reads a configuration file.
 ///
 /// # Examples
@@ -35,11 +35,11 @@ pub fn from_file(path: &str) -> Result<Config, Error> {
 pub async fn get(&self, url: &str) -> Result<Response, Error> {
     // ...
 }
-```
+````
 
 ## Good
 
-```rust
+````rust
 /// Reads a configuration file.
 ///
 /// # Examples
@@ -72,13 +72,13 @@ pub fn from_file(path: &str) -> Result<Config, Error> {
 pub async fn get(&self, url: &str) -> Result<Response, Error> {
     // ...
 }
-```
+````
 
 ## Doctest Wrapper Pattern
 
 Rust wraps doc examples in a function. You can make this explicit:
 
-```rust
+````rust
 /// # Examples
 ///
 /// ```
@@ -88,11 +88,11 @@ Rust wraps doc examples in a function. You can make this explicit:
 /// # Ok(())
 /// # }
 /// ```
-```
+````
 
 Or use the implicit wrapper (Rust 2021+):
 
-```rust
+````rust
 /// # Examples
 ///
 /// ```
@@ -101,13 +101,13 @@ Or use the implicit wrapper (Rust 2021+):
 /// assert_eq!(value.key, "value");
 /// # Ok::<(), my_crate::Error>(())
 /// ```
-```
+````
 
 ## When to Use `.unwrap()`
 
 There are specific cases where `.unwrap()` is acceptable in examples:
 
-```rust
+````rust
 /// # Examples
 ///
 /// ```
@@ -117,17 +117,17 @@ There are specific cases where `.unwrap()` is acceptable in examples:
 /// // Parsing a literal that cannot fail
 /// let n: i32 = "42".parse().unwrap();
 /// ```
-```
+````
 
 But still prefer `?` when demonstrating error handling patterns.
 
 ## Comparison
 
-| Pattern | Behavior on Error | Teaches |
-|---------|-------------------|---------|
-| `.unwrap()` | Panics with generic message | Bad habits |
-| `.expect()` | Panics with custom message | Slightly better |
-| `?` | Propagates error, test fails | Best practices |
+| Pattern     | Behavior on Error            | Teaches         |
+| ----------- | ---------------------------- | --------------- |
+| `.unwrap()` | Panics with generic message  | Bad habits      |
+| `.expect()` | Panics with custom message   | Slightly better |
+| `?`         | Propagates error, test fails | Best practices  |
 
 ## See Also
 

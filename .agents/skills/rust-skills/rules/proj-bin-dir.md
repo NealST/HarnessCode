@@ -102,12 +102,12 @@ fn main() {
 
 ## Binary Naming
 
-| File Path | Binary Name |
-|-----------|-------------|
-| `src/main.rs` | `my-project` (crate name) |
-| `src/bin/server.rs` | `server` |
-| `src/bin/my-cli.rs` | `my-cli` |
-| `src/bin/server/main.rs` | `server` |
+| File Path                | Binary Name               |
+| ------------------------ | ------------------------- |
+| `src/main.rs`            | `my-project` (crate name) |
+| `src/bin/server.rs`      | `server`                  |
+| `src/bin/my-cli.rs`      | `my-cli`                  |
+| `src/bin/server/main.rs` | `server`                  |
 
 ## Explicit Configuration
 

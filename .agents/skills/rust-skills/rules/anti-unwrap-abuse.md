@@ -71,7 +71,7 @@ if map.contains_key("key") {
 // Better: use if-let or entry API instead
 
 // 4. Truly impossible cases with proof comment
-let last = vec.pop().unwrap();  
+let last = vec.pop().unwrap();
 // OK only if you just checked !vec.is_empty()
 // Better: use last() or pattern match
 ```

@@ -77,7 +77,7 @@ log_message("literal");           // &str
 log_message(String::from("own")); // String
 log_message(Cow::from("cow"));    // Cow<str>
 
-// Path-like types  
+// Path-like types
 fn read_file(path: impl AsRef<Path>) { ... }  // AsRef for borrowed access
 fn write_file(path: impl Into<PathBuf>) { ... }  // Into when storing
 
@@ -141,7 +141,7 @@ impl Config {
             path: PathBuf::new(),
         }
     }
-    
+
     fn path(mut self, path: impl Into<PathBuf>) -> Self {
         self.path = path.into();
         self

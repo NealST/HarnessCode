@@ -16,7 +16,7 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
 }
 
 /// Parses and validates the input string.
-/// 
+///
 /// Returns the parsed value.  // What about errors?
 pub fn parse_input(input: &str) -> Result<Value, ParseError> {
     // ...
@@ -25,7 +25,7 @@ pub fn parse_input(input: &str) -> Result<Value, ParseError> {
 
 ## Good
 
-```rust
+````rust
 /// Loads a configuration from the specified path.
 ///
 /// # Errors
@@ -60,7 +60,7 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
 pub fn parse_positive_int(input: &str) -> Result<i64, ParseError> {
     // ...
 }
-```
+````
 
 ## Linking to Error Variants
 

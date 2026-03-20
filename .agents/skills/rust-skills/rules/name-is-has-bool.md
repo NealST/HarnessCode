@@ -12,10 +12,10 @@ Boolean methods answer yes/no questions. Prefixes like `is_`, `has_`, `can_` mak
 impl User {
     // Unclear: does this check or set?
     fn active(&self) -> bool { ... }
-    
+
     // Unclear: does this delete or check?
     fn deleted(&self) -> bool { ... }
-    
+
     // Unclear return type
     fn admin(&self) -> bool { ... }
 }
@@ -30,16 +30,16 @@ if user.active() { ... }  // Is this checking or activating?
 impl User {
     // Clear: answers "is the user active?"
     fn is_active(&self) -> bool { ... }
-    
+
     // Clear: answers "is the user deleted?"
     fn is_deleted(&self) -> bool { ... }
-    
+
     // Clear: answers "is the user an admin?"
     fn is_admin(&self) -> bool { ... }
-    
+
     // Clear: answers "does the user have permission X?"
     fn has_permission(&self, perm: Permission) -> bool { ... }
-    
+
     // Clear: answers "can the user edit?"
     fn can_edit(&self) -> bool { ... }
 }
@@ -52,14 +52,14 @@ if user.is_active() && user.has_permission(Permission::Write) {
 
 ## Common Prefixes
 
-| Prefix | Use For | Example |
-|--------|---------|---------|
-| `is_` | State/property check | `is_empty()`, `is_valid()`, `is_some()` |
-| `has_` | Possession/containment | `has_key()`, `has_children()`, `has_remaining()` |
-| `can_` | Capability/permission | `can_read()`, `can_write()`, `can_execute()` |
-| `should_` | Recommendation/policy | `should_retry()`, `should_cache()` |
-| `needs_` | Requirement | `needs_update()`, `needs_auth()` |
-| `will_` | Future action | `will_block()`, `will_overflow()` |
+| Prefix    | Use For                | Example                                          |
+| --------- | ---------------------- | ------------------------------------------------ |
+| `is_`     | State/property check   | `is_empty()`, `is_valid()`, `is_some()`          |
+| `has_`    | Possession/containment | `has_key()`, `has_children()`, `has_remaining()` |
+| `can_`    | Capability/permission  | `can_read()`, `can_write()`, `can_execute()`     |
+| `should_` | Recommendation/policy  | `should_retry()`, `should_cache()`               |
+| `needs_`  | Requirement            | `needs_update()`, `needs_auth()`                 |
+| `will_`   | Future action          | `will_block()`, `will_overflow()`                |
 
 ## Standard Library Examples
 
@@ -113,7 +113,7 @@ impl Config {
     fn is_enabled(&self) -> bool {
         self.enabled
     }
-    
+
     fn is_verbose(&self) -> bool {
         self.verbose
     }

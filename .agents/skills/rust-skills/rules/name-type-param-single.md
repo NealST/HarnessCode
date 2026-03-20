@@ -39,18 +39,18 @@ struct Ref<'a, T> { ... }        // Lifetime + Type
 
 ## Standard Type Parameter Names
 
-| Parameter | Meaning | Example |
-|-----------|---------|---------|
-| `T` | Type (generic) | `Vec<T>` |
-| `E` | Error | `Result<T, E>` |
-| `K` | Key | `HashMap<K, V>` |
-| `V` | Value | `HashMap<K, V>` |
-| `I` | Input / Item | `Iterator<Item = I>` |
-| `O` | Output | `Fn(I) -> O` |
-| `R` | Return / Result | `fn() -> R` |
-| `S` | State | `StateMachine<S>` |
-| `A` | Allocator | `Vec<T, A>` |
-| `F` | Function | `map<F>(f: F)` |
+| Parameter | Meaning         | Example              |
+| --------- | --------------- | -------------------- |
+| `T`       | Type (generic)  | `Vec<T>`             |
+| `E`       | Error           | `Result<T, E>`       |
+| `K`       | Key             | `HashMap<K, V>`      |
+| `V`       | Value           | `HashMap<K, V>`      |
+| `I`       | Input / Item    | `Iterator<Item = I>` |
+| `O`       | Output          | `Fn(I) -> O`         |
+| `R`       | Return / Result | `fn() -> R`          |
+| `S`       | State           | `StateMachine<S>`    |
+| `A`       | Allocator       | `Vec<T, A>`          |
+| `F`       | Function        | `map<F>(f: F)`       |
 
 ## Multiple Type Parameters
 

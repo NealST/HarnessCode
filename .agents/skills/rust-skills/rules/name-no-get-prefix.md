@@ -1,6 +1,6 @@
 # name-no-get-prefix
 
-> Omit get_ prefix for simple getters
+> Omit get\_ prefix for simple getters
 
 ## Why It Matters
 
@@ -20,11 +20,11 @@ impl User {
     fn get_name(&self) -> &str {      // Verbose
         &self.name
     }
-    
+
     fn get_age(&self) -> u32 {         // Verbose
         self.age
     }
-    
+
     fn get_is_adult(&self) -> bool {   // Doubly verbose
         self.age >= 18
     }
@@ -46,11 +46,11 @@ impl User {
     fn name(&self) -> &str {           // Clean
         &self.name
     }
-    
+
     fn age(&self) -> u32 {             // Clean
         self.age
     }
-    
+
     fn is_adult(&self) -> bool {       // Boolean uses is_ prefix
         self.age >= 18
     }
@@ -60,7 +60,7 @@ let name = user.name();
 let age = user.age();
 ```
 
-## When get_ IS Appropriate
+## When get\_ IS Appropriate
 
 Use `get` when the method does more than simple access:
 
@@ -68,7 +68,7 @@ Use `get` when the method does more than simple access:
 impl HashMap<K, V> {
     // Returns Option - not just field access
     fn get(&self, key: &K) -> Option<&V> { }
-    
+
     // Mutable variant
     fn get_mut(&mut self, key: &K) -> Option<&mut V> { }
 }
@@ -112,7 +112,7 @@ impl Config {
     fn timeout(&self) -> Duration {
         self.timeout
     }
-    
+
     // Setter: use set_ prefix
     fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
@@ -129,7 +129,7 @@ impl ConfigBuilder {
         self.timeout = timeout;
         self
     }
-    
+
     fn retries(mut self, retries: u32) -> Self {
         self.retries = retries;
         self
@@ -139,13 +139,13 @@ impl ConfigBuilder {
 
 ## Decision Guide
 
-| Pattern | Naming |
-|---------|--------|
-| Simple field access | `name()`, `value()`, `len()` |
-| Boolean property | `is_valid()`, `has_items()` |
-| Fallible access | `get()`, `get_mut()` |
-| Setter | `set_name()`, `set_value()` |
-| Builder | `name()`, `value()` (consuming self) |
+| Pattern             | Naming                               |
+| ------------------- | ------------------------------------ |
+| Simple field access | `name()`, `value()`, `len()`         |
+| Boolean property    | `is_valid()`, `has_items()`          |
+| Fallible access     | `get()`, `get_mut()`                 |
+| Setter              | `set_name()`, `set_value()`          |
+| Builder             | `name()`, `value()` (consuming self) |
 
 ## See Also
 

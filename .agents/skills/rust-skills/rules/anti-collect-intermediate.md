@@ -14,11 +14,11 @@ fn process(data: Vec<i32>) -> Vec<i32> {
     let step1: Vec<_> = data.into_iter()
         .filter(|x| *x > 0)
         .collect();
-    
+
     let step2: Vec<_> = step1.into_iter()
         .map(|x| x * 2)
         .collect();
-    
+
     step2.into_iter()
         .filter(|x| *x < 100)
         .collect()
@@ -92,16 +92,16 @@ let middle = indexed.get(indexed.len() / 2);
 
 ## Iterator Methods That Avoid Collection
 
-| Instead of Collecting to... | Use |
-|-----------------------------|-----|
-| Check if empty | `.any(|_| true)` or `.next().is_some()` |
-| Check if any match | `.any(predicate)` |
-| Check if all match | `.all(predicate)` |
-| Count elements | `.count()` |
-| Sum elements | `.sum()` |
-| Find first | `.find(predicate)` |
-| Get first | `.next()` |
-| Get last | `.last()` |
+| Instead of Collecting to... | Use                |
+| --------------------------- | ------------------ | --- | --------------------------- |
+| Check if empty              | `.any(             | \_  | true)`or`.next().is_some()` |
+| Check if any match          | `.any(predicate)`  |
+| Check if all match          | `.all(predicate)`  |
+| Count elements              | `.count()`         |
+| Sum elements                | `.sum()`           |
+| Find first                  | `.find(predicate)` |
+| Get first                   | `.next()`          |
+| Get last                    | `.last()`          |
 
 ## Pattern: Deferred Collection
 
@@ -118,11 +118,11 @@ let vec: Vec<_> = valid_items(&items).collect();  // Collection when needed
 
 ## Comparison
 
-| Pattern | Allocations | Passes |
-|---------|-------------|--------|
-| `.collect()` each step | N | N |
-| Single chain, one `.collect()` | 1 | 1 |
-| No collection (streaming) | 0 | 1 |
+| Pattern                        | Allocations | Passes |
+| ------------------------------ | ----------- | ------ |
+| `.collect()` each step         | N           | N      |
+| Single chain, one `.collect()` | 1           | 1      |
+| No collection (streaming)      | 0           | 1      |
 
 ## See Also
 

@@ -26,7 +26,7 @@ proptest! {
         let double_reversed: String = reversed.chars().rev().collect();
         assert_eq!(s, double_reversed);
     }
-    
+
     #[test]
     fn test_sort_is_idempotent(mut v in prop::collection::vec(any::<i32>(), 0..100)) {
         v.sort();
@@ -46,19 +46,19 @@ proptest! {
     // Any type implementing Arbitrary
     #[test]
     fn test_i32(x in any::<i32>()) { }
-    
+
     // Regex-based string generation
     #[test]
     fn test_email(email in "[a-z]+@[a-z]+\\.[a-z]{2,3}") { }
-    
+
     // Ranges
     #[test]
     fn test_range(x in 0..100i32) { }
-    
+
     // Collections
     #[test]
     fn test_vec(v in prop::collection::vec(any::<i32>(), 0..10)) { }
-    
+
     // Optionals
     #[test]
     fn test_option(opt in prop::option::of(any::<i32>())) { }
@@ -101,14 +101,14 @@ struct Point {
 
 ## Properties to Test
 
-| Property | Example |
-|----------|---------|
-| Roundtrip | `decode(encode(x)) == x` |
-| Idempotence | `f(f(x)) == f(x)` |
-| Commutativity | `f(a, b) == f(b, a)` |
+| Property      | Example                          |
+| ------------- | -------------------------------- |
+| Roundtrip     | `decode(encode(x)) == x`         |
+| Idempotence   | `f(f(x)) == f(x)`                |
+| Commutativity | `f(a, b) == f(b, a)`             |
 | Associativity | `f(f(a, b), c) == f(a, f(b, c))` |
-| Identity | `f(x, identity) == x` |
-| Invariants | `len(push(v, x)) == len(v) + 1` |
+| Identity      | `f(x, identity) == x`            |
+| Invariants    | `len(push(v, x)) == len(v) + 1`  |
 
 ## Example: Parser Roundtrip
 
@@ -148,7 +148,7 @@ proptest! {
         max_shrink_iters: 10000,  // More shrinking
         ..ProptestConfig::default()
     })]
-    
+
     #[test]
     fn extensive_test(x in any::<i32>()) { }
 }

@@ -31,7 +31,7 @@ struct Document {
 
 fn load_document(data: &[u8]) -> Document {
     let paragraphs: Vec<Paragraph> = parse_paragraphs(data);
-    Document { 
+    Document {
         paragraphs: paragraphs.into_boxed_slice()  // Shrinks + converts
     }
 }
@@ -74,12 +74,12 @@ let boxed = vec.into_boxed_slice();  // Now no wasted allocation
 
 ## When to Use What
 
-| Type | Use When |
-|------|----------|
-| `Vec<T>` | Collection may grow/shrink |
-| `Box<[T]>` | Fixed-size, heap-allocated, many instances |
-| `[T; N]` | Fixed-size, stack-allocated, size known at compile time |
-| `&[T]` | Borrowed view, don't need ownership |
+| Type       | Use When                                                |
+| ---------- | ------------------------------------------------------- |
+| `Vec<T>`   | Collection may grow/shrink                              |
+| `Box<[T]>` | Fixed-size, heap-allocated, many instances              |
+| `[T; N]`   | Fixed-size, stack-allocated, size known at compile time |
+| `&[T]`     | Borrowed view, don't need ownership                     |
 
 ## Box<str> for Immutable Strings
 
@@ -124,7 +124,7 @@ impl Cache {
         // Convert to boxed slice for storage
         self.entries.insert(key, data.into_boxed_slice());
     }
-    
+
     fn get(&self, key: &Key) -> Option<&[u8]> {
         // Returns regular slice reference
         self.entries.get(key).map(|b| b.as_ref())

@@ -77,16 +77,16 @@ if condition {
 
 ## Notable Lints in This Group
 
-| Lint | Simplification |
-|------|---------------|
+| Lint                  | Simplification                             |
+| --------------------- | ------------------------------------------ |
 | `bind_instead_of_map` | Use `map` instead of `and_then(Some(...))` |
-| `bool_comparison` | `if x == true` → `if x` |
-| `clone_on_copy` | Remove `.clone()` for Copy types |
-| `filter_next` | Use `.find()` instead |
-| `option_map_unit_fn` | Use `if let` instead |
-| `search_is_some` | Use `.any()` or `.contains()` |
-| `unnecessary_cast` | Remove redundant casts |
-| `useless_conversion` | Remove `.into()` when types match |
+| `bool_comparison`     | `if x == true` → `if x`                    |
+| `clone_on_copy`       | Remove `.clone()` for Copy types           |
+| `filter_next`         | Use `.find()` instead                      |
+| `option_map_unit_fn`  | Use `if let` instead                       |
+| `search_is_some`      | Use `.any()` or `.contains()`              |
+| `unnecessary_cast`    | Remove redundant casts                     |
+| `useless_conversion`  | Remove `.into()` when types match          |
 
 ## Examples
 

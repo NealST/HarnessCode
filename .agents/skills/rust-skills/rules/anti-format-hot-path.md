@@ -69,12 +69,12 @@ fn greet_to_buf(name: &str, buffer: &mut String) {
 
 ## Comparison
 
-| Approach | Allocations | Performance |
-|----------|-------------|-------------|
-| `format!()` in loop | N | Slow |
-| `write!()` to reused buffer | 1 | Fast |
-| `push_str()` + `push()` | 1 | Fastest |
-| Pre-sized `String::with_capacity()` | 1 (no realloc) | Fast |
+| Approach                            | Allocations    | Performance |
+| ----------------------------------- | -------------- | ----------- |
+| `format!()` in loop                 | N              | Slow        |
+| `write!()` to reused buffer         | 1              | Fast        |
+| `push_str()` + `push()`             | 1              | Fastest     |
+| Pre-sized `String::with_capacity()` | 1 (no realloc) | Fast        |
 
 ## When format! Is Fine
 
