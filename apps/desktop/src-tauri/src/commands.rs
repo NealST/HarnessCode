@@ -16,6 +16,7 @@ use harnesscode_core::{
         ClarificationCallback, ClarificationRequest, ClarificationResolution, Controller,
         PipelineEvent, RequestContext,
     },
+    memory::{FileSessionStore, SessionMemory, SessionMemoryPatch, SessionMemorySummary, SessionStore},
     observability::{CompositeSink, JsonLinesSink, SpanSink},
 };
 use std::{path::PathBuf, sync::Arc};
@@ -39,7 +40,10 @@ pub async fn start_pipeline(
 ) -> Result<(), String> {
     info!(prompt = %prompt, "start_pipeline invoked");
 
-    let request_context = request_context.unwrap_or_else(|| RequestContext::from_prompt(prompt.clone()));
+    let mut request_context = request_context.unwrap_or_else(|| RequestContext::from_prompt(prompt.clone()));
+    if request_context.session_id.is_none() {
+        request_context.session_id = Some("default".to_string());
+    }
 
     let llm = default_provider().map_err(|e| e.to_string())?;
 
@@ -58,7 +62,8 @@ pub async fn start_pipeline(
     };
 
     let controller = {
-        let mut c = Controller::new(3, llm).with_obs(sink);
+        let memory_store: Arc<dyn SessionStore> = Arc::new(FileSessionStore::for_project(&project_path));
+        let mut c = Controller::new(3, llm).with_obs(sink).with_memory(memory_store);
         // Frontend param > config file > default (100)
         let turns = max_tool_turns
             .or_else(|| load_config().max_tool_turns);
@@ -215,6 +220,67 @@ pub async fn get_run_history(project_dir: Option<String>) -> Vec<RunSummary> {
 
     summaries.sort_by(|a, b| b.started_at_secs.cmp(&a.started_at_secs));
     summaries
+}
+
+#[tauri::command]
+pub async fn list_memory_sessions(project_dir: Option<String>) -> Result<Vec<SessionMemorySummary>, String> {
+    let project_path = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let store = FileSessionStore::for_project(project_path);
+    store.list_sessions().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_session_memory(
+    session_id: String,
+    project_dir: Option<String>,
+) -> Result<SessionMemory, String> {
+    let project_path = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let store = FileSessionStore::for_project(project_path);
+    Ok(store
+        .get_session(&session_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| SessionMemory::new(session_id, None)))
+}
+
+#[tauri::command]
+pub async fn save_session_memory(
+    session_id: String,
+    title: Option<String>,
+    persistent_summary: Option<String>,
+    project_dir: Option<String>,
+) -> Result<SessionMemory, String> {
+    let project_path = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let store = FileSessionStore::for_project(project_path);
+    store
+        .patch_session(
+            &session_id,
+            SessionMemoryPatch {
+                title: title.filter(|value| !value.trim().is_empty()),
+                persistent_summary,
+                ..SessionMemoryPatch::default()
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn clear_session_memory(
+    session_id: String,
+    project_dir: Option<String>,
+) -> Result<SessionMemory, String> {
+    let project_path = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let store = FileSessionStore::for_project(project_path);
+    store.clear_session(&session_id).await.map_err(|e| e.to_string())
 }
 
 // ──────────────────────────────────────────────

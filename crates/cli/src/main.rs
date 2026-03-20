@@ -22,6 +22,7 @@ use harnesscode_core::{
         ClarificationCallback, ClarificationRequest, ClarificationResolution, Controller,
         PipelineEvent, RequestContext,
     },
+    memory::{FileSessionStore, SessionStore},
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::{Confirm, Select, Text};
@@ -52,6 +53,10 @@ struct Cli {
     /// Maximum tool-call turns before the agent loop is terminated (default: 100)
     #[arg(long, env = "HARNESSCODE_MAX_TOOL_TURNS")]
     max_tool_turns: Option<usize>,
+
+    /// Session id used for shared cross-run memory.
+    #[arg(long, env = "HARNESSCODE_SESSION", default_value = "default")]
+    session: String,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -553,7 +558,10 @@ async fn main() {
     };
 
     let controller = {
-        let mut c = Controller::new(3, llm);
+        let memory_store: Arc<dyn SessionStore> = Arc::new(FileSessionStore::for_project(
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        ));
+        let mut c = Controller::new(3, llm).with_memory(memory_store);
         // CLI flag > config file > default (100)
         let max_turns = cli.max_tool_turns
             .or_else(|| load_config().max_tool_turns);
@@ -566,6 +574,7 @@ async fn main() {
     // Spawn the pipeline on a separate task; receive progress events on this thread.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(16);
     let task_clone = task.clone();
+    let session_id = cli.session.clone();
     let clarification_callback: ClarificationCallback = Arc::new(move |request: ClarificationRequest| {
         Box::pin(async move {
             let prompt = format!(
@@ -586,9 +595,11 @@ async fn main() {
         })
     });
     let pipeline = tokio::spawn(async move {
+        let mut request_context = RequestContext::from_prompt(task_clone);
+        request_context.session_id = Some(session_id);
         controller
             .run_with_request_context(
-                &RequestContext::from_prompt(task_clone),
+                &request_context,
                 Some(tx),
                 None,
                 Some(clarification_callback),

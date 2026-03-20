@@ -50,7 +50,7 @@ toml = "0.8"
 dirs = "5"
 
 # UUID generation (for observability span/run IDs)
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # CLI utilities
 clap = { version = "4", features = ["derive", "env"] }

@@ -46,6 +46,7 @@ impl SessionState {
 /// Full request context used by routing, scoping, and later planning.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RequestContext {
+    pub session_id: Option<String>,
     pub current_request: String,
     pub conversation_summary: Option<String>,
     #[serde(default)]
@@ -57,6 +58,7 @@ pub struct RequestContext {
 impl RequestContext {
     pub fn from_prompt(prompt: impl Into<String>) -> Self {
         Self {
+            session_id: None,
             current_request: prompt.into(),
             conversation_summary: None,
             recent_messages: Vec::new(),
@@ -210,6 +212,7 @@ mod tests {
     #[test]
     fn request_context_from_prompt_is_minimal() {
         let context = RequestContext::from_prompt("Refactor login flow");
+        assert_eq!(context.session_id, None);
         assert_eq!(context.current_request, "Refactor login flow");
         assert!(!context.has_meaningful_context());
     }
@@ -217,6 +220,7 @@ mod tests {
     #[test]
     fn request_context_detects_history_and_session_state() {
         let context = RequestContext {
+            session_id: Some("default".into()),
             current_request: "Continue with the previous plan".into(),
             conversation_summary: Some("User already approved the migration strategy.".into()),
             recent_messages: vec![ConversationMessage {

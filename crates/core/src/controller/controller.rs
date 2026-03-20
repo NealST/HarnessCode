@@ -17,6 +17,7 @@ use crate::agents::{
     LlmReviewerAgent, LlmRiskAgent, LlmScoperAgent,
 };
 use crate::llm::LlmProvider;
+use crate::memory::{SessionMemory, SessionMemoryPatch, SessionStore};
 use crate::observability::{
     NoopSink, ObsCtx, SpanKind, SpanSink, SpanStatus, SpanTimer, TokenUsage,
 };
@@ -54,6 +55,8 @@ pub struct Controller {
     pub drift_judge: Option<Arc<DriftJudgeAgent>>,
     /// Drift detection configuration (only used when `drift_judge` is `Some`).
     pub drift_config: DriftConfig,
+    /// Optional multi-session memory store.
+    pub memory_store: Option<Arc<dyn SessionStore>>,
 }
 
 /// Sharable configuration for [`ExecutionGuard`] construction.
@@ -147,6 +150,7 @@ impl Controller {
             obs_sink: Arc::new(NoopSink),
             drift_judge: None,
             drift_config: DriftConfig::default(),
+            memory_store: None,
         }
     }
 
@@ -164,6 +168,7 @@ impl Controller {
             obs_sink: Arc::new(NoopSink),
             drift_judge: None,
             drift_config: DriftConfig::default(),
+            memory_store: None,
         }
     }
 
@@ -189,6 +194,12 @@ impl Controller {
     pub fn with_drift(mut self, judge: DriftJudgeAgent, config: DriftConfig) -> Self {
         self.drift_judge = Some(Arc::new(judge));
         self.drift_config = config;
+        self
+    }
+
+    /// Attach a multi-session memory store.
+    pub fn with_memory(mut self, store: Arc<dyn SessionStore>) -> Self {
+        self.memory_store = Some(store);
         self
     }
 
@@ -265,6 +276,7 @@ impl Controller {
 
         // ── Observability root ────────────────────────────────────────────
         let mut request_context = request_context.clone();
+        let mut session_memory = self.load_session_memory(&mut request_context).await?;
         let prompt = request_context.current_request.clone();
         let obs = ObsCtx::new_run(Arc::clone(&self.obs_sink));
         let pipeline_timer = SpanTimer::start();
@@ -369,6 +381,21 @@ impl Controller {
                     confidence: decision.confidence.clone(),
                 });
 
+                self.persist_memory_patch(
+                    &request_context,
+                    &mut session_memory,
+                    SessionMemoryPatch {
+                        title: Some(truncate_title(&request_context.current_request)),
+                        effective_requests: vec![decision.effective_request.clone()],
+                        persistent_summary: Some(format!(
+                            "route={} reason={}",
+                            decision.route, decision.route_reason_code
+                        )),
+                        ..SessionMemoryPatch::default()
+                    },
+                )
+                .await?;
+
                 if decision.ask_user_clarification {
                     let Some(callback) = clarification_callback.as_ref() else {
                         let error = format!(
@@ -428,6 +455,17 @@ impl Controller {
                                 &decision.clarifying_questions,
                                 answer,
                             );
+                            self.persist_memory_patch(
+                                &request_context,
+                                &mut session_memory,
+                                SessionMemoryPatch {
+                                    persistent_summary: request_context.session_state.persistent_summary.clone(),
+                                    clarified_facts: request_context.session_state.clarified_facts.clone(),
+                                    open_questions: request_context.session_state.open_questions.clone(),
+                                    ..SessionMemoryPatch::default()
+                                },
+                            )
+                            .await?;
                             clarification_round += 1;
                             if clarification_round >= 3 {
                                 let error = "Too many clarification rounds requested by Judge".to_string();
@@ -546,6 +584,17 @@ impl Controller {
                     }
                     ClarificationResolution::Answer(answer) => {
                         request_context.apply_clarification("scoper", &questions, answer);
+                        self.persist_memory_patch(
+                            &request_context,
+                            &mut session_memory,
+                            SessionMemoryPatch {
+                                persistent_summary: request_context.session_state.persistent_summary.clone(),
+                                clarified_facts: request_context.session_state.clarified_facts.clone(),
+                                open_questions: request_context.session_state.open_questions.clone(),
+                                ..SessionMemoryPatch::default()
+                            },
+                        )
+                        .await?;
                         scope_result = Some(scoper.execute(&serde_json::json!({
                             "request_context": request_context,
                             "effective_request": effective_request_override,
@@ -577,6 +626,23 @@ impl Controller {
         } else {
             scoped
         };
+        self.persist_memory_patch(
+            &request_context,
+            &mut session_memory,
+            SessionMemoryPatch {
+                execution_summary: Some(scoped.summary.clone()),
+                persistent_summary: scoped
+                    .payload
+                    .get("objective")
+                    .and_then(|value| value.as_str())
+                    .map(|objective| format!("Scoped objective: {objective}")),
+                known_relevant_files: payload_strings(&scoped.payload, "relevant_files"),
+                open_questions: payload_strings(&scoped.payload, "clarifying_questions"),
+                last_scope: Some(scoped.payload.clone()),
+                ..SessionMemoryPatch::default()
+            },
+        )
+        .await?;
         send!(PipelineEvent::StageCompleted { output: scoped.clone() });
         send!(PipelineEvent::ScopeReady {
             task_type: scoped.payload.get("task_type").and_then(|v| v.as_str()).unwrap_or("other").to_string(),
@@ -658,6 +724,17 @@ impl Controller {
                 }
                 Ok(o) => o,
             };
+            self.persist_memory_patch(
+                &request_context,
+                &mut session_memory,
+                SessionMemoryPatch {
+                    execution_summary: Some(plan.summary.clone()),
+                    known_relevant_files: payload_strings(&plan.payload, "affected_files"),
+                    last_plan: Some(plan.payload.clone()),
+                    ..SessionMemoryPatch::default()
+                },
+            )
+            .await?;
             send!(PipelineEvent::StageCompleted { output: plan.clone() });
             // ── Emit PlanReady so consumers can show the todo list ──────────────────
             {
@@ -825,6 +902,87 @@ impl Controller {
     }
 }
 
+impl Controller {
+    async fn load_session_memory(
+        &self,
+        request_context: &mut RequestContext,
+    ) -> Result<Option<SessionMemory>, AgentError> {
+        let Some(store) = self.memory_store.as_ref() else {
+            return Ok(None);
+        };
+        let Some(session_id) = request_context.session_id.as_deref() else {
+            return Ok(None);
+        };
+
+        let memory = store
+            .get_session(session_id)
+            .await?
+            .unwrap_or_else(|| SessionMemory::new(session_id.to_string(), Some(truncate_title(&request_context.current_request))));
+        merge_memory_into_request_context(request_context, &memory);
+        Ok(Some(memory))
+    }
+
+    async fn persist_memory_patch(
+        &self,
+        request_context: &RequestContext,
+        session_memory: &mut Option<SessionMemory>,
+        mut patch: SessionMemoryPatch,
+    ) -> Result<(), AgentError> {
+        let (Some(store), Some(session_id)) = (self.memory_store.as_ref(), request_context.session_id.as_deref()) else {
+            return Ok(());
+        };
+
+        if patch.title.is_none() {
+            patch.title = Some(truncate_title(&request_context.current_request));
+        }
+        let updated = store.patch_session(session_id, patch).await?;
+        *session_memory = Some(updated);
+        Ok(())
+    }
+}
+
+fn merge_memory_into_request_context(request_context: &mut RequestContext, memory: &SessionMemory) {
+    if request_context.session_state.execution_summary.is_none() {
+        request_context.session_state.execution_summary = memory.execution_summary.clone();
+    }
+    if request_context.session_state.persistent_summary.is_none() {
+        request_context.session_state.persistent_summary = memory.persistent_summary.clone();
+    }
+    merge_unique_strings(
+        &mut request_context.session_state.clarified_facts,
+        memory.clarified_facts.clone(),
+    );
+    merge_unique_strings(
+        &mut request_context.session_state.known_relevant_files,
+        memory.known_relevant_files.clone(),
+    );
+    if request_context.session_state.open_questions.is_empty() {
+        request_context.session_state.open_questions = memory.open_questions.clone();
+    }
+    if request_context.session_state.last_scope.is_none() {
+        request_context.session_state.last_scope = memory.last_scope.clone();
+    }
+    if request_context.session_state.last_plan.is_none() {
+        request_context.session_state.last_plan = memory.last_plan.clone();
+    }
+}
+
+fn merge_unique_strings(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !value.trim().is_empty() && !target.iter().any(|existing| existing == &value) {
+            target.push(value);
+        }
+    }
+}
+
+fn truncate_title(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= 60 {
+        return trimmed.to_string();
+    }
+    trimmed.chars().take(59).collect::<String>() + "…"
+}
+
 // ──────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────
@@ -952,6 +1110,7 @@ mod tests {
     #[test]
     fn history_aware_requests_do_not_force_scoper() {
         let request_context = RequestContext {
+            session_id: Some("default".into()),
             current_request: "继续按刚才的方案改".into(),
             conversation_summary: Some("User already approved the earlier controller refactor.".into()),
             recent_messages: vec![crate::controller::ConversationMessage {

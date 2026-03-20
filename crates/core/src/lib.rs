@@ -12,6 +12,7 @@
 //! | [`observability`] | Span types, [`SpanSink`](observability::SpanSink) trait, [`TerminalSink`](observability::TerminalSink), [`JsonLinesSink`](observability::JsonLinesSink) |
 //! | [`context`] | Helpers for generating and parsing `agents.md` / `Claude.md` context files |
 //! | [`llm`] | LLM provider trait and vendor adapters |
+//! | [`memory`] | Multi-session conversation memory storage and persistence |
 //! | [`tools`] | Tool registry and builtin tool implementations |
 
 pub mod agents;
@@ -19,5 +20,6 @@ pub mod config;
 pub mod context;
 pub mod controller;
 pub mod llm;
+pub mod memory;
 pub mod observability;
 pub mod tools;

@@ -12,7 +12,7 @@ import ClarificationModal, {
 } from "@/components/ClarificationModal";
 import SettingsPanel from "@/components/SettingsPanel";
 
-const SESSION_DIGEST_STORAGE_KEY = "harnesscode.sessionDigest.v1";
+const CURRENT_SESSION_STORAGE_KEY = "harnesscode.currentSessionId.v1";
 
 // ──────────────────────────────────────────────
 // Chat message model
@@ -39,63 +39,21 @@ interface SessionStatePayload {
   execution_summary: string | null;
   last_scope: ScopeReadyEvent | null;
   last_plan: PlanReadyEvent | null;
-  persistent_summary: string | null;
-  clarified_facts: string[];
   known_relevant_files: string[];
   open_questions: string[];
 }
 
 interface RequestContextPayload {
+  session_id: string | null;
   current_request: string;
   conversation_summary: string | null;
   recent_messages: RequestConversationMessage[];
   session_state: SessionStatePayload;
 }
 
-interface SessionDigest {
-  persistentSummary: string | null;
-  clarifiedFacts: string[];
-  effectiveRequests: string[];
-}
-
-function emptySessionDigest(): SessionDigest {
-  return {
-    persistentSummary: null,
-    clarifiedFacts: [],
-    effectiveRequests: [],
-  };
-}
-
-function loadSessionDigest(): SessionDigest {
-  if (typeof window === "undefined") return emptySessionDigest();
-  try {
-    const raw = window.localStorage.getItem(SESSION_DIGEST_STORAGE_KEY);
-    if (!raw) return emptySessionDigest();
-    const parsed = JSON.parse(raw) as Partial<SessionDigest>;
-    return {
-      persistentSummary: parsed.persistentSummary ?? null,
-      clarifiedFacts: parsed.clarifiedFacts ?? [],
-      effectiveRequests: parsed.effectiveRequests ?? [],
-    };
-  } catch {
-    return emptySessionDigest();
-  }
-}
-
-function summariseDigest(digest: SessionDigest): string | null {
-  const parts = [
-    ...(digest.persistentSummary ? [digest.persistentSummary] : []),
-    ...digest.clarifiedFacts.slice(-3),
-    ...(digest.effectiveRequests.length
-      ? [
-          `Recent effective requests: ${digest.effectiveRequests
-            .slice(-2)
-            .join(" | ")}`,
-        ]
-      : []),
-  ].filter(Boolean);
-
-  return parts.length ? parts.join("\n") : null;
+function loadCurrentSessionId(): string {
+  if (typeof window === "undefined") return "default";
+  return window.localStorage.getItem(CURRENT_SESSION_STORAGE_KEY) || "default";
 }
 
 function compactText(value: string, max = 220): string {
@@ -106,8 +64,8 @@ function compactText(value: string, max = 220): string {
 
 function buildRequestContext(
   messages: ChatMessage[],
+  sessionId: string,
   currentRequest: string,
-  digest: SessionDigest,
 ): RequestContextPayload {
   let lastScope: ScopeReadyEvent | null = null;
   let lastPlan: PlanReadyEvent | null = null;
@@ -156,6 +114,7 @@ function buildRequestContext(
   );
 
   return {
+    session_id: sessionId,
     current_request: currentRequest,
     conversation_summary: conversationSummary,
     recent_messages: recentMessages,
@@ -165,8 +124,6 @@ function buildRequestContext(
         : null,
       last_scope: lastScope,
       last_plan: lastPlan,
-      persistent_summary: summariseDigest(digest),
-      clarified_facts: digest.clarifiedFacts,
       known_relevant_files: knownRelevantFiles,
       open_questions:
         lastScope?.needs_user_clarification && lastScope.clarifying_questions.length
@@ -197,8 +154,8 @@ export default function App() {
   );
   const [clarificationPayload, setClarificationPayload] =
     useState<ClarificationPayload | null>(null);
-  const [sessionDigest, setSessionDigest] = useState<SessionDigest>(() =>
-    loadSessionDigest(),
+  const [currentSessionId, setCurrentSessionId] = useState<string>(() =>
+    loadCurrentSessionId(),
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -218,11 +175,8 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(
-      SESSION_DIGEST_STORAGE_KEY,
-      JSON.stringify(sessionDigest),
-    );
-  }, [sessionDigest]);
+    window.localStorage.setItem(CURRENT_SESSION_STORAGE_KEY, currentSessionId);
+  }, [currentSessionId]);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -232,7 +186,7 @@ export default function App() {
 
       const userMsgId = crypto.randomUUID();
       const agentMsgId = crypto.randomUUID();
-      const requestContext = buildRequestContext(messages, prompt, sessionDigest);
+      const requestContext = buildRequestContext(messages, currentSessionId, prompt);
 
       setMessages((prev) => [
         ...prev,
@@ -261,14 +215,6 @@ export default function App() {
         if (ev.type === "drift_detected") {
           // Show the drift modal; don't add it to the pipeline event stream.
           setDriftPayload(ev as unknown as DriftDetectedPayload);
-        } else if (ev.type === "judge_ready") {
-          setSessionDigest((prev) => ({
-            ...prev,
-            effectiveRequests: Array.from(
-              new Set([...prev.effectiveRequests, ev.effective_request]),
-            ).slice(-8),
-          }));
-          appendEvent(ev);
         } else if (ev.type === "clarification_requested") {
           setClarificationPayload({
             source: ev.source,
@@ -328,7 +274,7 @@ export default function App() {
         setLoading(false);
       }
     },
-    [input, loading, messages, sessionDigest],
+    [input, loading, messages, currentSessionId],
   );
 
   return (
@@ -336,6 +282,8 @@ export default function App() {
       {/* ── Settings panel (slide-out) ── */}
       <SettingsPanel
         open={settingsOpen}
+        currentSessionId={currentSessionId}
+        onSessionChange={setCurrentSessionId}
         onClose={() => setSettingsOpen(false)}
       />
       {/* ── Drift modal (portal-like, renders on top) ── */}
@@ -348,28 +296,6 @@ export default function App() {
       {clarificationPayload && (
         <ClarificationModal
           payload={clarificationPayload}
-          onSubmitted={(answer) => {
-            if (!answer?.trim()) return;
-            setSessionDigest((prev) => {
-              const fact = `${clarificationPayload.source}: ${clarificationPayload.questions.join(" | ")} => ${answer.trim()}`;
-              const clarifiedFacts = Array.from(
-                new Set([...prev.clarifiedFacts, fact]),
-              ).slice(-12);
-              const persistentSummary = [
-                prev.persistentSummary,
-                `Clarified objective: ${clarificationPayload.objective}`,
-                answer.trim(),
-              ]
-                .filter(Boolean)
-                .join("\n");
-
-              return {
-                ...prev,
-                persistentSummary,
-                clarifiedFacts,
-              };
-            });
-          }}
           onClose={() => setClarificationPayload(null)}
         />
       )}

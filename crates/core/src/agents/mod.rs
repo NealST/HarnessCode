@@ -55,6 +55,9 @@ pub enum AgentError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("memory error: {0}")]
+    Memory(#[from] crate::memory::MemoryError),
+
     #[error("LLM provider error: {0}")]
     Provider(#[from] crate::llm::LlmError),
 

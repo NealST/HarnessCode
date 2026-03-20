@@ -11,6 +11,8 @@
 //! | [`commands::get_config`]          | Read the resolved configuration for the settings panel |
 //! | [`commands::save_config_profile`] | Persist a profile into `~/.harnesscode/config.toml` |
 //! | [`commands::get_run_history`]     | Read past run summaries from `.harnesscode/runs.jsonl` |
+//! | [`commands::list_memory_sessions`] | List persisted session memories for the current project |
+//! | [`commands::get_session_memory`]   | Read one persisted session memory |
 //!
 //! ## Event flow for `start_pipeline`
 //!
@@ -285,6 +287,10 @@ pub fn run() {
             commands::save_config_profile,
             commands::save_settings,
             commands::get_run_history,
+            commands::list_memory_sessions,
+            commands::get_session_memory,
+            commands::save_session_memory,
+            commands::clear_session_memory,
             commands::submit_drift_decision,
             commands::submit_clarification_response,
         ])
