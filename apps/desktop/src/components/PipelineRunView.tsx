@@ -75,7 +75,7 @@ export interface StageSummary {
   success: boolean;
 }
 
-const STAGE_ORDER = ["judge", "scoper", "planner", "coder", "risk", "reviewer"];
+const STAGE_ORDER = ["judge", "scoper", "planner", "conductor", "risk", "reviewer"];
 
 // ── PlanTodoList ─────────────────────────────────────────────────────────────────
 
@@ -209,7 +209,7 @@ const ROLE_ICON: Record<string, string> = {
   judge: "⚖️",
   scoper: "🧭",
   planner: "🧠",
-  coder: "💻",
+  conductor: "💻",
   risk: "🛡️",
   reviewer: "🔍",
 };

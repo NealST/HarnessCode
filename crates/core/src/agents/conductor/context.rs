@@ -1,6 +1,6 @@
-//! System prompt and context assembly for the Coder agent.
+//! System prompt and context assembly for the Conductor agent.
 
-/// System prompt injected into every Coder LLM call.
+/// System prompt injected into every Conductor LLM call.
 pub const SYSTEM: &str = "\
 You are an expert software engineer working on a real codebase via HarnessCode.
 You have access to tools to read and modify files. Use them to implement the task.

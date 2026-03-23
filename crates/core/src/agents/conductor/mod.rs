@@ -1,4 +1,4 @@
-//! Coder agent — implements the plan by reading/writing files via the tool loop.
+//! Conductor agent — executes the plan by reading/writing files via the tool loop.
 
 pub mod context;
 
@@ -11,7 +11,7 @@ use crate::tools::ToolRegistry;
 use std::sync::Arc;
 use tracing::info;
 
-/// Coder agent backed by an LLM with full tool access.
+/// Conductor agent backed by an LLM with full tool access.
 ///
 /// Drives the agentic `run_tool_loop` — the LLM reasons, calls file/shell tools,
 /// reads results, and repeats until it produces a final JSON diff summary.
@@ -20,7 +20,7 @@ use tracing::info;
 /// concurrent tool ceiling, per-tool rate limits).
 ///
 /// The `obs` parameter receives ToolTurn and ToolCall spans for this execution.
-pub struct LlmCoderAgent {
+pub struct LlmConductorAgent {
     pub llm: Arc<dyn LlmProvider>,
     pub registry: Arc<ToolRegistry>,
     pub guard: Arc<ExecutionGuard>,
@@ -30,13 +30,13 @@ pub struct LlmCoderAgent {
 }
 
 #[async_trait::async_trait]
-impl Agent for LlmCoderAgent {
+impl Agent for LlmConductorAgent {
     fn role(&self) -> AgentRole {
-        AgentRole::Coder
+        AgentRole::Conductor
     }
 
     async fn execute(&self, plan_context: &str) -> Result<AgentOutput, AgentError> {
-        info!(role = %AgentRole::Coder, "Generating code changes from plan");
+        info!(role = %AgentRole::Conductor, "Executing plan");
 
         let messages = vec![
             LlmMessage::system(context::SYSTEM),
@@ -54,7 +54,7 @@ impl Agent for LlmCoderAgent {
             .unwrap_or_else(|| "Code changes generated".to_string());
 
         Ok(AgentOutput {
-            role: AgentRole::Coder,
+            role: AgentRole::Conductor,
             summary,
             payload,
             success: true,

@@ -9,11 +9,12 @@
 //! |------------|------|
 //! | [`planner`] | Decomposes the user's goal into an ordered execution plan |
 //! | [`judge`] | Decides whether the request needs clarification, scoping, or direct planning |
-//! | [`coder`]   | Implements the plan using file tools; produces a diff summary |
+//! | [`conductor`] | Executes the plan using file tools; produces a diff summary |
 //! | [`risk`]    | Assesses the diff for semantic risk and security implications |
 //! | [`reviewer`]| Validates correctness and decides pass/fail |
 
-pub mod coder;
+pub mod compactor;
+pub mod conductor;
 pub mod drift_judge;
 pub mod judge;
 pub mod planner;
@@ -21,7 +22,8 @@ pub mod reviewer;
 pub mod risk;
 pub mod scoper;
 
-pub use coder::LlmCoderAgent;
+pub use compactor::CompactorAgent;
+pub use conductor::LlmConductorAgent;
 pub use drift_judge::{
     DriftCallback, DriftConfig, DriftDecision, DriftJudgeAgent, DriftKind, DriftParams,
     DriftSignal, TurnSummary,
@@ -88,8 +90,8 @@ pub enum AgentRole {
     Scoper,
     /// Breaks the user's goal into discrete, verifiable steps.
     Planner,
-    /// Writes and applies code changes inside the sandbox.
-    Coder,
+    /// Executes the plan — applies changes, runs commands, and produces a diff summary.
+    Conductor,
     /// Analyses the code diff for semantic risk and tags it for CR awareness.
     Risk,
     /// Validates the output, runs tests, and decides pass/fail.
@@ -102,7 +104,7 @@ impl fmt::Display for AgentRole {
             AgentRole::Judge => write!(f, "Judge"),
             AgentRole::Scoper => write!(f, "Scoper"),
             AgentRole::Planner => write!(f, "Planner"),
-            AgentRole::Coder => write!(f, "Coder"),
+            AgentRole::Conductor => write!(f, "Conductor"),
             AgentRole::Risk => write!(f, "Risk"),
             AgentRole::Reviewer => write!(f, "Reviewer"),
         }

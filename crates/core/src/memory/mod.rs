@@ -2,10 +2,54 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::fs;
+use tracing::warn;
 use uuid::Uuid;
+
+// Maximum number of entries retained in accumulating vec fields.
+// Keeps session JSON small and token usage bounded when reading context into LLM prompts.
+const MAX_EFFECTIVE_REQUESTS: usize = 20;
+const MAX_CLARIFIED_FACTS: usize = 50;
+const MAX_KNOWN_RELEVANT_FILES: usize = 100;
+const MAX_CONVERSATION_TURNS: usize = 50;
+
+/// How many of the most-recent turns are expanded into verbatim `recent_messages`.
+/// Older turns beyond this window are compressed into `conversation_summary`.
+pub const RECENT_TURNS_WINDOW: usize = 4;
+
+/// Estimated-token threshold for the older turns (those outside `RECENT_TURNS_WINDOW`).
+/// When the rough token count of compactable turns exceeds this value, the controller
+/// spawns a background compaction task — mirroring how Claude Code manages context.
+///
+/// Approximation: 1 token ≈ 4 ASCII characters.
+/// Modern models have 128K+ context windows. Reserving ~6K tokens for older history
+/// means compaction fires roughly every 85 average-length turns outside the window.
+pub const COMPACTION_TRIGGER_TOKENS: usize = 6_000;
+
+/// A single recorded exchange between the user and the agent pipeline.
+/// Persisted inside [`SessionMemory`] so that conversation history survives
+/// page reloads, CLI restarts, and the desktop ↔ CLI boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationTurn {
+    /// The effective request the user submitted (post-Judge rewrite when applicable).
+    pub request: String,
+    /// A short plain-text summary of what the pipeline did (from the Reviewer output).
+    pub response_summary: String,
+    pub timestamp_secs: u64,
+}
+
+impl ConversationTurn {
+    pub fn new(request: impl Into<String>, response_summary: impl Into<String>) -> Self {
+        Self {
+            request: request.into(),
+            response_summary: response_summary.into(),
+            timestamp_secs: now_secs(),
+        }
+    }
+}
 
 /// Persisted memory for one session.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -24,6 +68,16 @@ pub struct SessionMemory {
     pub open_questions: Vec<String>,
     pub last_scope: Option<serde_json::Value>,
     pub last_plan: Option<serde_json::Value>,
+    /// Ordered history of user↔agent exchanges. The controller appends one entry
+    /// per successful pipeline run and reads these back on the next request to
+    /// populate `recent_messages` and `conversation_summary` in the `RequestContext`.
+    #[serde(default)]
+    pub conversation_turns: Vec<ConversationTurn>,
+    /// LLM-generated rolling summary of turns that have been compacted out of
+    /// `conversation_turns`. Produced by the controller when the estimated token
+    /// cost of older turns exceeds `COMPACTION_TRIGGER_TOKENS`.
+    #[serde(default)]
+    pub compacted_summary: Option<String>,
     pub created_at_secs: u64,
     pub updated_at_secs: u64,
 }
@@ -42,6 +96,8 @@ impl SessionMemory {
             open_questions: Vec::new(),
             last_scope: None,
             last_plan: None,
+            conversation_turns: Vec::new(),
+            compacted_summary: None,
             created_at_secs: now,
             updated_at_secs: now,
         }
@@ -76,6 +132,11 @@ pub struct SessionMemoryPatch {
     pub open_questions: Vec<String>,
     pub last_scope: Option<serde_json::Value>,
     pub last_plan: Option<serde_json::Value>,
+    /// A completed exchange to append to the session's conversation history.
+    pub new_conversation_turn: Option<ConversationTurn>,
+    /// Replacement value for the LLM-generated compacted summary.
+    /// Set by the controller after a successful compaction pass.
+    pub compacted_summary: Option<String>,
 }
 
 impl SessionMemoryPatch {
@@ -89,6 +150,8 @@ impl SessionMemoryPatch {
             && self.open_questions.is_empty()
             && self.last_scope.is_none()
             && self.last_plan.is_none()
+            && self.new_conversation_turn.is_none()
+            && self.compacted_summary.is_none()
     }
 }
 
@@ -147,7 +210,7 @@ impl FileSessionStore {
 #[async_trait]
 impl SessionStore for FileSessionStore {
     async fn get_session(&self, session_id: &str) -> Result<Option<SessionMemory>, MemoryError> {
-        self.ensure_dir().await?;
+        // No ensure_dir here — a missing directory simply means no session exists yet.
         let path = self.file_path(session_id);
         match fs::read_to_string(path).await {
             Ok(content) => Ok(Some(serde_json::from_str(&content)?)),
@@ -160,7 +223,12 @@ impl SessionStore for FileSessionStore {
         self.ensure_dir().await?;
         let path = self.file_path(&memory.session_id);
         let content = serde_json::to_string_pretty(memory)?;
-        fs::write(path, content).await?;
+        // Atomic write: first write to a .tmp side-car, then rename.
+        // rename(2) on the same filesystem is atomic, so a crash mid-write
+        // can never leave a truncated JSON file behind.
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, content).await?;
+        fs::rename(&tmp_path, &path).await?;
         Ok(())
     }
 
@@ -170,26 +238,7 @@ impl SessionStore for FileSessionStore {
         patch: SessionMemoryPatch,
     ) -> Result<SessionMemory, MemoryError> {
         let mut memory = self.load_or_default(session_id).await?;
-        if let Some(title) = patch.title {
-            memory.title = Some(title);
-        }
-        if let Some(execution_summary) = patch.execution_summary {
-            memory.execution_summary = Some(execution_summary);
-        }
-        if let Some(persistent_summary) = patch.persistent_summary {
-            memory.persistent_summary = Some(persistent_summary);
-        }
-        merge_unique(&mut memory.clarified_facts, patch.clarified_facts);
-        merge_unique(&mut memory.effective_requests, patch.effective_requests);
-        merge_unique(&mut memory.known_relevant_files, patch.known_relevant_files);
-        memory.open_questions = patch.open_questions;
-        if let Some(last_scope) = patch.last_scope {
-            memory.last_scope = Some(last_scope);
-        }
-        if let Some(last_plan) = patch.last_plan {
-            memory.last_plan = Some(last_plan);
-        }
-        memory.touch();
+        apply_patch(&mut memory, patch);
         self.save_session(&memory).await?;
         Ok(memory)
     }
@@ -202,7 +251,7 @@ impl SessionStore for FileSessionStore {
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), MemoryError> {
-        self.ensure_dir().await?;
+        // No ensure_dir — deleting a non-existent file is a no-op.
         let path = self.file_path(session_id);
         match fs::remove_file(path).await {
             Ok(()) => Ok(()),
@@ -212,19 +261,37 @@ impl SessionStore for FileSessionStore {
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionMemorySummary>, MemoryError> {
-        self.ensure_dir().await?;
-        let mut entries = fs::read_dir(&self.root).await?;
+        // If the directory doesn't exist yet there are simply no sessions.
+        let mut entries = match fs::read_dir(&self.root).await {
+            Ok(e) => e,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
         let mut sessions = Vec::new();
 
         while let Some(entry) = entries.next_entry().await? {
-            if entry.file_type().await?.is_file() {
-                let content = fs::read_to_string(entry.path()).await?;
-                let memory: SessionMemory = serde_json::from_str(&content)?;
-                sessions.push(SessionMemorySummary {
-                    session_id: memory.session_id,
-                    title: memory.title,
-                    updated_at_secs: memory.updated_at_secs,
-                });
+            let path = entry.path();
+            if !entry.file_type().await?.is_file() {
+                continue;
+            }
+            // Skip in-flight .tmp side-cars from an interrupted atomic write.
+            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                continue;
+            }
+            let content = match fs::read_to_string(&path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "Failed to read session file; skipping");
+                    continue;
+                }
+            };
+            // Deserialise only the three lightweight fields; serde ignores the rest.
+            // This avoids loading last_scope/last_plan payloads (potentially large) into memory.
+            match serde_json::from_str::<SessionMemorySummary>(&content) {
+                Ok(summary) => sessions.push(summary),
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "Failed to parse session file; skipping");
+                }
             }
         }
 
@@ -233,11 +300,80 @@ impl SessionStore for FileSessionStore {
     }
 }
 
+/// Apply a [`SessionMemoryPatch`] to an existing [`SessionMemory`] in place.
+///
+/// Exposed publicly so the controller can apply patches to its in-memory cached copy
+/// and then call `save_session` directly, avoiding a redundant disk read.
+pub fn apply_patch(memory: &mut SessionMemory, patch: SessionMemoryPatch) {
+    if let Some(title) = patch.title {
+        memory.title = Some(title);
+    }
+    if let Some(execution_summary) = patch.execution_summary {
+        memory.execution_summary = Some(execution_summary);
+    }
+    if let Some(persistent_summary) = patch.persistent_summary {
+        memory.persistent_summary = Some(persistent_summary);
+    }
+    merge_unique(&mut memory.clarified_facts, patch.clarified_facts);
+    truncate_vec(&mut memory.clarified_facts, MAX_CLARIFIED_FACTS);
+    merge_unique(&mut memory.effective_requests, patch.effective_requests);
+    truncate_vec(&mut memory.effective_requests, MAX_EFFECTIVE_REQUESTS);
+    merge_unique(&mut memory.known_relevant_files, patch.known_relevant_files);
+    truncate_vec(&mut memory.known_relevant_files, MAX_KNOWN_RELEVANT_FILES);
+    // open_questions: only replace when the patch actually supplies new ones;
+    // an empty Vec means "no update" to preserve questions from earlier turns.
+    if !patch.open_questions.is_empty() {
+        memory.open_questions = patch.open_questions;
+    }
+    if let Some(last_scope) = patch.last_scope {
+        memory.last_scope = Some(last_scope);
+    }
+    if let Some(last_plan) = patch.last_plan {
+        memory.last_plan = Some(last_plan);
+    }
+    if let Some(turn) = patch.new_conversation_turn {
+        memory.conversation_turns.push(turn);
+        if memory.conversation_turns.len() > MAX_CONVERSATION_TURNS {
+            let excess = memory.conversation_turns.len() - MAX_CONVERSATION_TURNS;
+            memory.conversation_turns.drain(..excess);
+        }
+    }
+    if let Some(summary) = patch.compacted_summary {
+        memory.compacted_summary = Some(summary);
+    }
+    memory.touch();
+}
+
+/// Returns `true` when the older turns (those outside the recent window) contain
+/// enough text that an LLM compaction pass should be triggered.
+///
+/// The token estimate is intentionally coarse: one token ≈ four ASCII characters.
+pub fn needs_compaction(memory: &SessionMemory) -> bool {
+    if memory.conversation_turns.len() <= RECENT_TURNS_WINDOW {
+        return false;
+    }
+    let split_at = memory.conversation_turns.len() - RECENT_TURNS_WINDOW;
+    let older_char_count: usize = memory.conversation_turns[..split_at]
+        .iter()
+        .map(|t| t.request.len() + t.response_summary.len())
+        .sum();
+    older_char_count / 4 > COMPACTION_TRIGGER_TOKENS
+}
+
+/// Merge `values` into `target`, skipping blanks and duplicates.  O(n) via HashSet.
 fn merge_unique(target: &mut Vec<String>, values: Vec<String>) {
+    let mut seen: HashSet<String> = target.iter().cloned().collect();
     for value in values {
-        if !value.trim().is_empty() && !target.iter().any(|existing| existing == &value) {
+        if !value.trim().is_empty() && seen.insert(value.clone()) {
             target.push(value);
         }
+    }
+}
+
+/// Retain only the most-recent `max` items, dropping the oldest from the front.
+fn truncate_vec(v: &mut Vec<String>, max: usize) {
+    if v.len() > max {
+        *v = v.split_off(v.len() - max);
     }
 }
 

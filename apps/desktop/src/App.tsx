@@ -30,11 +30,6 @@ interface ChatMessage {
 type ScopeReadyEvent = Extract<PipelineEventDto, { type: "scope_ready" }>;
 type PlanReadyEvent = Extract<PipelineEventDto, { type: "plan_ready" }>;
 
-interface RequestConversationMessage {
-  role: "user" | "assistant";
-  content: string;
-}
-
 interface SessionStatePayload {
   execution_summary: string | null;
   last_scope: ScopeReadyEvent | null;
@@ -46,8 +41,6 @@ interface SessionStatePayload {
 interface RequestContextPayload {
   session_id: string | null;
   current_request: string;
-  conversation_summary: string | null;
-  recent_messages: RequestConversationMessage[];
   session_state: SessionStatePayload;
 }
 
@@ -56,11 +49,6 @@ function loadCurrentSessionId(): string {
   return window.localStorage.getItem(CURRENT_SESSION_STORAGE_KEY) || "default";
 }
 
-function compactText(value: string, max = 220): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= max) return normalized;
-  return normalized.slice(0, max - 1) + "…";
-}
 
 function buildRequestContext(
   messages: ChatMessage[],
@@ -79,22 +67,6 @@ function buildRequestContext(
       }
     }
   }
-
-  const recentMessages = messages
-    .filter((message) => message.id !== "welcome" && message.content.trim())
-    .slice(-6)
-    .map<RequestConversationMessage>((message) => ({
-      role: message.type === "user" ? "user" : "assistant",
-      content: compactText(message.content),
-    }));
-
-  const conversationSummary = recentMessages.length
-    ? recentMessages
-        .map((message) =>
-          `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`,
-        )
-        .join("\n")
-    : null;
 
   const executionSummaryParts: string[] = [];
   if (lastScope) {
@@ -116,8 +88,6 @@ function buildRequestContext(
   return {
     session_id: sessionId,
     current_request: currentRequest,
-    conversation_summary: conversationSummary,
-    recent_messages: recentMessages,
     session_state: {
       execution_summary: executionSummaryParts.length
         ? executionSummaryParts.join("\n")

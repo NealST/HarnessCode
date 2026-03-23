@@ -1,7 +1,7 @@
 //! The cybernetic Controller — schedules agents and enforces pipeline-level rules.
 //!
 //! The Controller is the "safety harness" around the multi-agent pipeline:
-//! * Drives the Judge → Scoper → Planner → Coder → Risk → Reviewer sequence.
+//! * Drives the Judge → Scoper → Planner → Conductor → Risk → Reviewer sequence.
 //! * Enforces retry limits and step budgets.
 //! * Constructs a fresh [`ExecutionGuard`] for each attempt so resource budgets
 //!   reset cleanly between retries.
@@ -12,12 +12,14 @@ use super::guardrails::ExecutionGuard;
 use super::interaction::{ClarificationCallback, ClarificationRequest, ClarificationResolution};
 use super::request_context::RequestContext;
 use crate::agents::{
+    compactor::CompactorAgent,
     drift_judge::{DriftCallback, DriftConfig, DriftJudgeAgent, DriftParams},
-    Agent, AgentError, AgentOutput, AgentRole, JudgeAgent, LlmCoderAgent, LlmPlannerAgent,
+    Agent, AgentError, AgentOutput, AgentRole, JudgeAgent, LlmConductorAgent, LlmPlannerAgent,
     LlmReviewerAgent, LlmRiskAgent, LlmScoperAgent,
 };
 use crate::llm::LlmProvider;
-use crate::memory::{SessionMemory, SessionMemoryPatch, SessionStore};
+use crate::memory::{apply_patch, ConversationTurn, RECENT_TURNS_WINDOW, SessionMemory, SessionMemoryPatch, SessionStore};
+use crate::controller::request_context::{ConversationMessage, ConversationRole};
 use crate::observability::{
     NoopSink, ObsCtx, SpanKind, SpanSink, SpanStatus, SpanTimer, TokenUsage,
 };
@@ -44,7 +46,7 @@ pub struct Controller {
     pub max_retries: usize,
     /// The LLM backend shared by all agents in the pipeline.
     pub llm: Arc<dyn LlmProvider>,
-    /// The tool registry available to the Coder during tool-use turns.
+    /// The tool registry available to the Conductor during tool-use turns.
     pub registry: Arc<ToolRegistry>,
     /// Guardrail template — cloned into a fresh guard for each pipeline attempt.
     pub guard_template: ExecutionGuardTemplate,
@@ -93,8 +95,8 @@ impl ExecutionGuardTemplate {
     }
 }
 
-fn synthetic_scope(request_context: &RequestContext) -> AgentOutput {
-    let prompt = request_context.current_request.trim();
+fn synthetic_scope(request_context: &RequestContext, effective_request: &str) -> AgentOutput {
+    let prompt = effective_request.trim();
     let relevant_files = request_context.session_state.known_relevant_files.clone();
     let inherited_success = request_context
         .session_state
@@ -387,10 +389,8 @@ impl Controller {
                     SessionMemoryPatch {
                         title: Some(truncate_title(&request_context.current_request)),
                         effective_requests: vec![decision.effective_request.clone()],
-                        persistent_summary: Some(format!(
-                            "route={} reason={}",
-                            decision.route, decision.route_reason_code
-                        )),
+                        // Do not write route/reason here: it would overwrite the semantic
+                        // persistent_summary (e.g. "Scoped objective: ...") from prior turns.
                         ..SessionMemoryPatch::default()
                     },
                 )
@@ -503,9 +503,14 @@ impl Controller {
                 );
             }
         };
+        // Keep effective_prompt in sync with what the Judge resolved so the
+        // Planner always receives the fully-interpreted request.
+        effective_prompt = effective_request_override.clone();
 
         // ── Stage 1: Scoping ──────────────────────────────────────────────
-        send!(PipelineEvent::StageStarted { role: AgentRole::Scoper });
+        if should_run_scoper {
+            send!(PipelineEvent::StageStarted { role: AgentRole::Scoper });
+        }
         let stage_timer = SpanTimer::start();
         let mut scope_result = if should_run_scoper {
             Some(scoper.execute(&scoper_input).await)
@@ -552,7 +557,7 @@ impl Controller {
                 return result;
             }
             Some(Ok(o)) => o,
-            None => synthetic_scope(&request_context),
+            None => synthetic_scope(&request_context, &effective_request_override),
         };
         let scoped = if scoped.payload.get("needs_user_clarification").and_then(|value| value.as_bool()).unwrap_or(false) {
             if let Some(callback) = clarification_callback.as_ref() {
@@ -595,10 +600,20 @@ impl Controller {
                             },
                         )
                         .await?;
+                        let retry_timer = SpanTimer::start();
                         scope_result = Some(scoper.execute(&serde_json::json!({
                             "request_context": request_context,
                             "effective_request": effective_request_override,
                         }).to_string()).await);
+                        let retry_tokens = scope_result.as_ref().and_then(|r| r.as_ref().ok()).and_then(|o| o.tokens);
+                        if let Some(t) = retry_tokens { pipeline_tokens.add(t); }
+                        let retry_span_status = match &scope_result {
+                            Some(Ok(o)) if o.success => SpanStatus::Ok,
+                            Some(Ok(o)) => SpanStatus::Retried { reason: o.summary.clone() },
+                            Some(Err(e)) => SpanStatus::Error { message: e.to_string() },
+                            None => SpanStatus::Ok,
+                        };
+                        obs.record(retry_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Scoper, attempt: 2 }, retry_span_status, retry_tokens));
                         match scope_result {
                             Some(Ok(output)) => output,
                             Some(Err(e)) => {
@@ -663,9 +678,9 @@ impl Controller {
 
             let guard = Arc::new(self.guard_template.build());
 
-            // Coder's ObsCtx is a child of the pipeline span so its ToolTurn/
+            // Conductor's ObsCtx is a child of the pipeline span so its ToolTurn/
             // ToolCall children nest correctly in the span tree.
-            let coder_obs = obs.child(pipeline_span_id);
+            let conductor_obs = obs.child(pipeline_span_id);
 
             // Construct agents.
             let planner_guard   = Arc::new(self.guard_template.build_planner());
@@ -676,8 +691,8 @@ impl Controller {
                 guard:    planner_guard,
                 obs:      planner_obs,
             };
-            // Build drift params for the coder if a judge and callback are available.
-            let coder_drift = self.drift_judge.as_ref()
+            // Build drift params for the conductor if a judge and callback are available.
+            let conductor_drift = self.drift_judge.as_ref()
                 .zip(drift_callback.as_ref())
                 .map(|(judge, callback)| DriftParams {
                     judge: Arc::clone(judge),
@@ -687,7 +702,7 @@ impl Controller {
                     original_prompt: original_prompt.clone(),
                     callback: Arc::clone(callback),
                 });
-            let coder      = LlmCoderAgent    { llm: Arc::clone(&self.llm), registry: Arc::clone(&self.registry), guard: Arc::clone(&guard), obs: coder_obs, drift: coder_drift };
+            let conductor = LlmConductorAgent { llm: Arc::clone(&self.llm), registry: Arc::clone(&self.registry), guard: Arc::clone(&guard), obs: conductor_obs, drift: conductor_drift };
             let risk_agent = LlmRiskAgent     { llm: Arc::clone(&self.llm) };
             let reviewer   = LlmReviewerAgent { llm: Arc::clone(&self.llm) };
 
@@ -757,15 +772,15 @@ impl Controller {
                     send!(PipelineEvent::PlanReady { steps, affected_files, complexity });
                 }
             }
-            // ── Stage 2: Coding with guardrails ──────────────────────────────
-            send!(PipelineEvent::StageStarted { role: AgentRole::Coder });
+            // ── Stage 2: Execution (Conductor) ────────────────────────────────
+            send!(PipelineEvent::StageStarted { role: AgentRole::Conductor });
             let stage_timer = SpanTimer::start();
-            let context_for_coder = serde_json::json!({
+            let context_for_conductor = serde_json::json!({
                 "request_context": request_context,
                 "problem_frame": scoped.payload,
                 "plan": plan.payload,
             }).to_string();
-            let code_result = coder.execute(&context_for_coder).await;
+            let code_result = conductor.execute(&context_for_conductor).await;
             let code_tokens = code_result.as_ref().ok().and_then(|o| o.tokens);
             if let Some(t) = code_tokens { pipeline_tokens.add(t); }
             let code_span_status = match &code_result {
@@ -776,7 +791,7 @@ impl Controller {
                     SpanStatus::Retried { reason: "drift restart".into() },
                 Err(e) => SpanStatus::Error { message: e.to_string() },
             };
-            obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Coder, attempt }, code_span_status, code_tokens));
+            obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Conductor, attempt }, code_span_status, code_tokens));
             let code_output = match code_result {
                 Err(AgentError::DriftAborted) => {
                     warn!("Pipeline aborted by user after drift detection");
@@ -802,15 +817,15 @@ impl Controller {
                     continue;
                 }
                 Err(e) => {
-                    warn!(error = %e, "Coder failed");
-                    maybe_send_network_error!(e, AgentRole::Coder);
+                    warn!(error = %e, "Conductor failed");
+                    maybe_send_network_error!(e, AgentRole::Conductor);
                     send!(PipelineEvent::PipelineFailed { error: e.to_string() });
                     if attempt >= self.max_retries { result = Err(AgentError::MaxRetriesExceeded(self.max_retries)); break; }
                     continue;
                 }
                 Ok(o) if !o.success => {
-                    warn!(role = %o.role, "Coder reported failure");
-                    send!(PipelineEvent::PipelineFailed { error: format!("Coder failed: {}", o.summary) });
+                    warn!(role = %o.role, "Conductor reported failure");
+                    send!(PipelineEvent::PipelineFailed { error: format!("Conductor failed: {}", o.summary) });
                     if attempt >= self.max_retries { result = Err(AgentError::MaxRetriesExceeded(self.max_retries)); break; }
                     continue;
                 }
@@ -880,6 +895,35 @@ impl Controller {
             send!(PipelineEvent::StageCompleted { output: review.clone() });
 
             info!(attempt, "Pipeline converged successfully");
+            // Persist a conversation turn so history is available on the next request.
+            // Uses the Reviewer's summary as the response_summary — it is the most
+            // complete synthesis of what the pipeline accomplished.
+            self.persist_memory_patch(
+                &request_context,
+                &mut session_memory,
+                SessionMemoryPatch {
+                    new_conversation_turn: Some(ConversationTurn::new(
+                        effective_prompt.as_str(),
+                        review.summary.as_str(),
+                    )),
+                    ..SessionMemoryPatch::default()
+                },
+            )
+            .await?;
+            // Pipeline succeeded — spawn the Compactor sub-agent as a fire-and-forget
+            // background task. The Compactor re-reads the session, checks the token
+            // budget, and runs an LLM summarisation pass if needed. The caller receives
+            // the pipeline result immediately without waiting for compaction.
+            if let (Some(store), Some(session_id), Some(memory)) = (
+                self.memory_store.as_ref(),
+                request_context.session_id.as_deref(),
+                session_memory.as_ref(),
+            ) {
+                let agent    = CompactorAgent { llm: Arc::clone(&self.llm), store: Arc::clone(store) };
+                let sid      = session_id.to_string();
+                let snapshot = memory.clone();
+                tokio::spawn(async move { agent.compact(&sid, snapshot).await });
+            }
             result = Ok(vec![judge_output.clone(), scoped.clone(), plan, code_output, risk_output, review]);
             break;
         }
@@ -935,8 +979,15 @@ impl Controller {
         if patch.title.is_none() {
             patch.title = Some(truncate_title(&request_context.current_request));
         }
-        let updated = store.patch_session(session_id, patch).await?;
-        *session_memory = Some(updated);
+        // Apply the patch to the in-memory cached copy instead of re-reading from disk.
+        // This avoids one disk read per stage while still writing the updated state.
+        let sid = session_id.to_string();
+        let title_fallback = patch.title.clone();
+        let memory = session_memory.get_or_insert_with(|| {
+            SessionMemory::new(sid, title_fallback)
+        });
+        apply_patch(memory, patch);
+        store.save_session(memory).await?;
         Ok(())
     }
 }
@@ -964,6 +1015,44 @@ fn merge_memory_into_request_context(request_context: &mut RequestContext, memor
     }
     if request_context.session_state.last_plan.is_none() {
         request_context.session_state.last_plan = memory.last_plan.clone();
+    }
+
+    // Build recent_messages and conversation_summary from persisted conversation turns.
+    // This ensures history is available to all agents regardless of the calling client
+    // (desktop, CLI, or test), and survives page reloads and process restarts.
+    if request_context.recent_messages.is_empty() && !memory.conversation_turns.is_empty() {
+        let turns = &memory.conversation_turns;
+        let window_start = turns.len().saturating_sub(RECENT_TURNS_WINDOW);
+
+        // The most-recent turns go into recent_messages as verbatim user/assistant pairs.
+        for turn in &turns[window_start..] {
+            request_context.recent_messages.push(ConversationMessage {
+                role: ConversationRole::User,
+                content: turn.request.clone(),
+            });
+            request_context.recent_messages.push(ConversationMessage {
+                role: ConversationRole::Assistant,
+                content: turn.response_summary.clone(),
+            });
+        }
+
+        // Older turns: use the LLM-generated compacted_summary if available;
+        // fall back to raw join only before the first compaction pass.
+        if request_context.conversation_summary.is_none() {
+            if let Some(ref s) = memory.compacted_summary {
+                request_context.conversation_summary = Some(s.clone());
+            } else {
+                let older = &turns[..window_start];
+                if !older.is_empty() {
+                    let summary = older
+                        .iter()
+                        .map(|t| format!("User: {}\nAssistant: {}", t.request.trim(), t.response_summary.trim()))
+                        .collect::<Vec<_>>()
+                        .join("\n---\n");
+                    request_context.conversation_summary = Some(summary);
+                }
+            }
+        }
     }
 }
 
@@ -1087,7 +1176,7 @@ mod tests {
             AgentRole::Planner,
         );
         assert_eq!(
-            LlmCoderAgent {
+            LlmConductorAgent {
                 llm: Arc::clone(&llm),
                 registry: Arc::new(crate::tools::ToolRegistry::empty()),
                 guard,
@@ -1095,7 +1184,7 @@ mod tests {
                 drift: None,
             }
             .role(),
-            AgentRole::Coder
+            AgentRole::Conductor
         );
         assert_eq!(LlmRiskAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Risk);
         assert_eq!(LlmReviewerAgent { llm: Arc::clone(&llm) }.role(), AgentRole::Reviewer);

@@ -413,8 +413,8 @@ fn print_pipeline_result(outputs: &[AgentOutput]) {
             }
         }
 
-        // ── Coder: colourised diff ────────────────────────────────────────────
-        if output.role == AgentRole::Coder {
+        // ── Conductor: colourised diff ────────────────────────────────────────
+        if output.role == AgentRole::Conductor {
             if let Some(diff) = output.payload.get("diff").and_then(|d| d.as_str()) {
                 println!();
                 for line in diff.lines() {
@@ -613,7 +613,7 @@ async fn main() {
             AgentRole::Judge    => ("⚖️", "Judge   "),
             AgentRole::Scoper   => ("🧭", "Scoper  "),
             AgentRole::Planner  => ("🧠", "Planner "),
-            AgentRole::Coder    => ("💻", "Coder   "),
+            AgentRole::Conductor => ("💻", "Conductor"),
             AgentRole::Risk     => ("🛡️", "Risk    "),
             AgentRole::Reviewer => ("🔍", "Reviewer"),
         }
