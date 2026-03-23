@@ -25,8 +25,7 @@ pub const RECENT_TURNS_WINDOW: usize = 4;
 /// spawns a background compaction task — mirroring how Claude Code manages context.
 ///
 /// Approximation: 1 token ≈ 4 ASCII characters.
-/// Modern models have 128K+ context windows. Reserving ~6K tokens for older history
-/// means compaction fires roughly every 85 average-length turns outside the window.
+/// At ~350 chars/turn average: 6 000 × 4 / 350 ≈ 68 turns outside the window.
 pub const COMPACTION_TRIGGER_TOKENS: usize = 6_000;
 
 /// A single recorded exchange between the user and the agent pipeline.
@@ -137,6 +136,13 @@ pub struct SessionMemoryPatch {
     /// Replacement value for the LLM-generated compacted summary.
     /// Set by the controller after a successful compaction pass.
     pub compacted_summary: Option<String>,
+    /// Atomic compaction payload produced by [`CompactorAgent`].
+    ///
+    /// Drains all turns with `timestamp_secs <= drain_up_to_timestamp` **and** installs
+    /// `new_summary` in a single `patch_session` call, so the drain and the summary
+    /// update are applied to the freshest on-disk state — avoiding a
+    /// read-modify-write race with concurrent controller saves.
+    pub compaction: Option<CompactionPatch>,
 }
 
 impl SessionMemoryPatch {
@@ -152,7 +158,23 @@ impl SessionMemoryPatch {
             && self.last_plan.is_none()
             && self.new_conversation_turn.is_none()
             && self.compacted_summary.is_none()
+            && self.compaction.is_none()
     }
+}
+
+/// Payload carried by [`SessionMemoryPatch::compaction`].
+///
+/// The `drain_up_to_timestamp` field identifies the boundary: every stored
+/// `ConversationTurn` whose `timestamp_secs` is **≤** this value is removed
+/// from `conversation_turns`, and `new_summary` is installed as the new
+/// `compacted_summary`.  Any turns added concurrently by the controller
+/// (which always get a fresh `now_secs()` timestamp) survive untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionPatch {
+    /// LLM-generated rolling summary that replaces the drained turns.
+    pub new_summary: String,
+    /// Drain all `ConversationTurn`s with `timestamp_secs <= this value`.
+    pub drain_up_to_timestamp: u64,
 }
 
 #[derive(Debug, Error)]
@@ -340,6 +362,12 @@ pub fn apply_patch(memory: &mut SessionMemory, patch: SessionMemoryPatch) {
     }
     if let Some(summary) = patch.compacted_summary {
         memory.compacted_summary = Some(summary);
+    }
+    if let Some(c) = patch.compaction {
+        // Drain all turns up to and including the timestamp boundary.
+        // Turns added by concurrent controller saves (higher timestamps) are kept.
+        memory.conversation_turns.retain(|t| t.timestamp_secs > c.drain_up_to_timestamp);
+        memory.compacted_summary = Some(c.new_summary);
     }
     memory.touch();
 }

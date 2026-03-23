@@ -1020,6 +1020,11 @@ fn merge_memory_into_request_context(request_context: &mut RequestContext, memor
     // Build recent_messages and conversation_summary from persisted conversation turns.
     // This ensures history is available to all agents regardless of the calling client
     // (desktop, CLI, or test), and survives page reloads and process restarts.
+    //
+    // The two concerns are kept independent: recent_messages is only populated when
+    // the caller hasn't pre-filled it, but conversation_summary is always derived
+    // from compacted_summary (or older turns) regardless — so LLM-generated context
+    // is never silently dropped for callers that supply their own recent_messages.
     if request_context.recent_messages.is_empty() && !memory.conversation_turns.is_empty() {
         let turns = &memory.conversation_turns;
         let window_start = turns.len().saturating_sub(RECENT_TURNS_WINDOW);
@@ -1035,22 +1040,25 @@ fn merge_memory_into_request_context(request_context: &mut RequestContext, memor
                 content: turn.response_summary.clone(),
             });
         }
+    }
 
-        // Older turns: use the LLM-generated compacted_summary if available;
-        // fall back to raw join only before the first compaction pass.
-        if request_context.conversation_summary.is_none() {
-            if let Some(ref s) = memory.compacted_summary {
-                request_context.conversation_summary = Some(s.clone());
-            } else {
-                let older = &turns[..window_start];
-                if !older.is_empty() {
-                    let summary = older
-                        .iter()
-                        .map(|t| format!("User: {}\nAssistant: {}", t.request.trim(), t.response_summary.trim()))
-                        .collect::<Vec<_>>()
-                        .join("\n---\n");
-                    request_context.conversation_summary = Some(summary);
-                }
+    // Older turns: use the LLM-generated compacted_summary if available;
+    // fall back to raw join only before the first compaction pass.
+    // Done unconditionally so callers that supply recent_messages still get the summary.
+    if request_context.conversation_summary.is_none() {
+        if let Some(ref s) = memory.compacted_summary {
+            request_context.conversation_summary = Some(s.clone());
+        } else if !memory.conversation_turns.is_empty() {
+            let turns = &memory.conversation_turns;
+            let window_start = turns.len().saturating_sub(RECENT_TURNS_WINDOW);
+            let older = &turns[..window_start];
+            if !older.is_empty() {
+                let summary = older
+                    .iter()
+                    .map(|t| format!("User: {}\nAssistant: {}", t.request.trim(), t.response_summary.trim()))
+                    .collect::<Vec<_>>()
+                    .join("\n---\n");
+                request_context.conversation_summary = Some(summary);
             }
         }
     }
