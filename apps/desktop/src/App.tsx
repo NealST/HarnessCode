@@ -6,11 +6,13 @@ import PipelineRunView, {
   type PipelineDoneEvent,
 } from "@/components/PipelineRunView";
 import RunHistoryPanel from "@/components/RunHistoryPanel";
+import SessionListPanel, { type ConversationTurn } from "@/components/SessionListPanel";
 import DriftModal, { type DriftDetectedPayload } from "@/components/DriftModal";
 import ClarificationModal, {
   type ClarificationPayload,
 } from "@/components/ClarificationModal";
 import SettingsPanel from "@/components/SettingsPanel";
+import CommandResultView, { type CommandResult } from "@/components/CommandResultView";
 
 const CURRENT_SESSION_STORAGE_KEY = "harnesscode.currentSessionId.v1";
 
@@ -20,11 +22,14 @@ const CURRENT_SESSION_STORAGE_KEY = "harnesscode.currentSessionId.v1";
 
 interface ChatMessage {
   id: string;
-  type: "user" | "agent";
+  /** "user" = human bubble, "agent" = pipeline card, "command" = /command result */
+  type: "user" | "agent" | "command";
   content: string;
   /** Set while streaming; removed when done */
   pipelineEvents?: PipelineEventDto[];
   pipelineDone?: PipelineDoneEvent;
+  /** Populated for type==="command" messages */
+  commandResult?: CommandResult;
 }
 
 type ScopeReadyEvent = Extract<PipelineEventDto, { type: "scope_ready" }>;
@@ -44,9 +49,98 @@ interface RequestContextPayload {
   session_state: SessionStatePayload;
 }
 
+// ──────────────────────────────────────────────
+// Built-in /command parser + executor
+// ──────────────────────────────────────────────
+
+type BuiltinCmd =
+  | { tag: "help" }
+  | { tag: "cost" }
+  | { tag: "clear" }
+  | { tag: "rename"; name: string | null }
+  | { tag: "session_list" }
+  | { tag: "session_use"; id: string | null }
+  | { tag: "session_delete"; id: string }
+  | { tag: "unknown"; raw: string };
+
+function parseBuiltin(input: string): BuiltinCmd | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/")) return null;
+  const withoutSlash = trimmed.slice(1);
+  const parts = withoutSlash.split(/\s+/);
+  const cmd = (parts[0] ?? "").toLowerCase();
+  const arg1 = parts[1] ?? null;
+  const rest = parts.slice(2).join(" ") || null;
+  switch (cmd) {
+    case "help": case "?": return { tag: "help" };
+    case "cost":            return { tag: "cost" };
+    case "clear": case "reset": return { tag: "clear" };
+    case "rename": {
+      const fullName = withoutSlash.slice("rename".length).trim() || null;
+      return { tag: "rename", name: fullName };
+    }
+    case "session":
+      switch ((arg1 ?? "").toLowerCase()) {
+        case "list":   return { tag: "session_list" };
+        case "use":    return { tag: "session_use", id: rest };
+        case "delete": case "rm":
+          return rest
+            ? { tag: "session_delete", id: rest }
+            : { tag: "unknown", raw: "/session delete requires a session id" };
+        default: return { tag: "unknown", raw: "Unknown /session subcommand. Try /help." };
+      }
+    default:
+      return { tag: "unknown", raw: `Unknown command: ${trimmed}. Type /help for available commands.` };
+  }
+}
+
+const HELP_TEXT: CommandResult = {
+  command: "/help",
+  status: "info",
+  title: "Built-in commands",
+  lines: [
+    { variant: "kv", text: "/help              : Show this reference" },
+    { variant: "kv", text: "/cost              : Turn count + estimated token usage" },
+    { variant: "kv", text: "/clear             : Wipe current session history" },
+    { variant: "kv", text: "/rename [name]     : Rename current session" },
+    { variant: "kv", text: "/session list      : List all saved sessions" },
+    { variant: "kv", text: "/session use [id]  : Switch to another session" },
+    { variant: "kv", text: "/session delete id : Permanently delete a session" },
+    { variant: "divider", text: "" },
+    { variant: "dim", text: "Anything else is sent to the AI pipeline." },
+  ],
+};
+
+function fmtRelTime(secs: number): string {
+  const diff = Math.floor(Date.now() / 1000) - secs;
+  if (diff < 120)    return "just now";
+  if (diff < 3600)   return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400)  return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(secs * 1000).toLocaleDateString();
+}
+
 function loadCurrentSessionId(): string {
   if (typeof window === "undefined") return "default";
   return window.localStorage.getItem(CURRENT_SESSION_STORAGE_KEY) || "default";
+}
+
+/** Convert persisted ConversationTurns to ChatMessages for display. */
+function turnsToMessages(turns: ConversationTurn[]): ChatMessage[] {
+  const msgs: ChatMessage[] = [];
+  for (const turn of turns) {
+    msgs.push({
+      id: `turn-user-${turn.timestamp_secs}`,
+      type: "user",
+      content: turn.request,
+    });
+    msgs.push({
+      id: `turn-agent-${turn.timestamp_secs}`,
+      type: "agent",
+      content: turn.response_summary,
+    });
+  }
+  return msgs;
 }
 
 
@@ -119,6 +213,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [historyKey, setHistoryKey] = useState(0);
+  const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
   const [driftPayload, setDriftPayload] = useState<DriftDetectedPayload | null>(
     null,
   );
@@ -128,6 +223,7 @@ export default function App() {
     loadCurrentSessionId(),
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [cmdPending, setCmdPending] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const unlistenRef = useRef<UnlistenFn[]>([]);
 
@@ -148,11 +244,195 @@ export default function App() {
     window.localStorage.setItem(CURRENT_SESSION_STORAGE_KEY, currentSessionId);
   }, [currentSessionId]);
 
+  /** Switch to a different session and restore its conversation history. */
+  const switchSession = useCallback(
+    (sessionId: string, turns: ConversationTurn[]) => {
+      setCurrentSessionId(sessionId);
+      if (turns.length > 0) {
+        setMessages(turnsToMessages(turns));
+      } else {
+        setMessages([
+          {
+            id: "welcome",
+            type: "agent",
+            content: "👋 Welcome to HarnessCode! I'm your safe AI coding agent. Tell me what you'd like to build or fix.",
+          },
+        ]);
+      }
+      setHistoryKey((k) => k + 1);
+    },
+    [],
+  );
+
+  // ── Built-in /command executor ──────────────────────────────────────────
+  const handleCommand = useCallback(
+    async (raw: string, parsed: BuiltinCmd) => {
+      const cmdMsgId = crypto.randomUUID();
+
+      type MemTurn = { request: string; response_summary: string; timestamp_secs: number };
+      type MemFull = { conversation_turns: MemTurn[]; compacted_summary: string | null; title: string | null };
+      type SessionSummary = { session_id: string; title: string | null; updated_at_secs: number };
+
+      const pushResult = (result: CommandResult) => {
+        setMessages((prev) => [
+          ...prev,
+          { id: `user-cmd-${cmdMsgId}`, type: "user" as const, content: raw },
+          { id: cmdMsgId, type: "command" as const, content: "", commandResult: result },
+        ]);
+      };
+
+      setCmdPending(true);
+      try {
+        switch (parsed.tag) {
+          case "help": {
+            pushResult(HELP_TEXT);
+            break;
+          }
+
+          case "cost": {
+            const mem = await invoke<MemFull>("get_session_memory", {
+              sessionId: currentSessionId,
+              projectDir: null,
+            });
+            const turns = mem.conversation_turns.length;
+            const estTokens = mem.conversation_turns.reduce(
+              (acc, t) => acc + Math.floor((t.request.length + t.response_summary.length) / 4),
+              0,
+            );
+            const compactedTokens = mem.compacted_summary
+              ? Math.floor(mem.compacted_summary.length / 4)
+              : null;
+            pushResult({
+              command: "/cost",
+              status: "info",
+              title: `Session: ${mem.title ?? currentSessionId}`,
+              lines: [
+                { variant: "kv", text: `Turns in history   : ${turns}` },
+                { variant: "kv", text: `Est. history tokens: ~${estTokens}` },
+                ...(compactedTokens !== null
+                  ? [{ variant: "kv" as const, text: `Compacted summary  : ~${compactedTokens} tokens` }]
+                  : []),
+              ],
+            });
+            break;
+          }
+
+          case "clear": {
+            await invoke("clear_session_memory", { sessionId: currentSessionId, projectDir: null });
+            setMessages([{
+              id: "welcome",
+              type: "agent",
+              content: "👋 Welcome to HarnessCode! I'm your safe AI coding agent. Tell me what you'd like to build or fix.",
+            }]);
+            setHistoryKey((k) => k + 1);
+            setSessionRefreshKey((k) => k + 1);
+            break;
+          }
+
+          case "rename": {
+            const newTitle = parsed.name ?? window.prompt("New session name:");
+            if (!newTitle?.trim()) {
+              pushResult({ command: raw, status: "info", title: "Aborted." });
+              break;
+            }
+            await invoke("save_session_memory", {
+              sessionId: currentSessionId,
+              title: newTitle.trim(),
+              persistentSummary: null,
+              projectDir: null,
+            });
+            setSessionRefreshKey((k) => k + 1);
+            pushResult({ command: raw, status: "ok", title: `Session renamed to "${newTitle.trim()}"` });
+            break;
+          }
+
+          case "session_list": {
+            const sessions = await invoke<SessionSummary[]>("list_memory_sessions", { projectDir: null });
+            if (sessions.length === 0) {
+              pushResult({ command: raw, status: "info", title: "No saved sessions yet." });
+            } else {
+              pushResult({
+                command: raw,
+                status: "info",
+                title: `${sessions.length} session${sessions.length === 1 ? "" : "s"}`,
+                lines: [
+                  { variant: "heading", text: "session id  ·  title  ·  last updated" },
+                  ...sessions.map((s) => ({
+                    variant: "body" as const,
+                    text: `${s.session_id === currentSessionId ? "▶ " : "  "}${s.session_id.slice(0, 22).padEnd(22)}  ${(s.title ?? "—").slice(0, 24).padEnd(24)}  ${fmtRelTime(s.updated_at_secs)}`,
+                  })),
+                ],
+              });
+            }
+            break;
+          }
+
+          case "session_use": {
+            const targetId = parsed.id ?? window.prompt("Session id (leave blank to cancel):");
+            if (!targetId?.trim()) {
+              pushResult({ command: raw, status: "info", title: "Aborted." });
+              break;
+            }
+            const trimmedId = targetId.trim();
+            if (trimmedId === currentSessionId) {
+              pushResult({ command: raw, status: "info", title: `Already on session "${currentSessionId}".` });
+              break;
+            }
+            const mem = await invoke<MemFull>("get_session_memory", {
+              sessionId: trimmedId,
+              projectDir: null,
+            });
+            switchSession(trimmedId, mem.conversation_turns);
+            pushResult({ command: raw, status: "ok", title: `Switched to session "${trimmedId}"` });
+            break;
+          }
+
+          case "session_delete": {
+            if (!window.confirm(`Delete session "${parsed.id}"? This cannot be undone.`)) {
+              pushResult({ command: raw, status: "info", title: "Aborted." });
+              break;
+            }
+            await invoke("delete_session_memory", { sessionId: parsed.id, projectDir: null });
+            if (parsed.id === currentSessionId) {
+              switchSession("default", []);
+            }
+            setSessionRefreshKey((k) => k + 1);
+            pushResult({ command: raw, status: "ok", title: `Session "${parsed.id}" deleted.` });
+            break;
+          }
+
+          case "unknown": {
+            pushResult({ command: raw, status: "error", title: parsed.raw });
+            break;
+          }
+        }
+      } catch (err) {
+        pushResult({
+          command: raw,
+          status: "error",
+          title: `Error: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      } finally {
+        setCmdPending(false);
+      }
+    },
+    [currentSessionId, switchSession],
+  );
+
+  // ── AI pipeline submit ─────────────────────────────────────────────────────
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
       const prompt = input.trim();
-      if (!prompt || loading) return;
+      if (!prompt || loading || cmdPending) return;
+
+      // Intercept built-in /commands before sending to AI
+      const parsed = parseBuiltin(prompt);
+      if (parsed) {
+        setInput("");
+        await handleCommand(prompt, parsed);
+        return;
+      }
 
       const userMsgId = crypto.randomUUID();
       const agentMsgId = crypto.randomUUID();
@@ -212,8 +492,9 @@ export default function App() {
               : m,
           ),
         );
-        // Refresh history sidebar after run completes
+        // Refresh history sidebar and session list after run completes
         setHistoryKey((k) => k + 1);
+        setSessionRefreshKey((k) => k + 1);
         setLoading(false);
         // Detach listeners; they're one-shot per run
         ul1();
@@ -244,7 +525,7 @@ export default function App() {
         setLoading(false);
       }
     },
-    [input, loading, messages, currentSessionId],
+    [input, loading, cmdPending, messages, currentSessionId, handleCommand],
   );
 
   return (
@@ -253,7 +534,8 @@ export default function App() {
       <SettingsPanel
         open={settingsOpen}
         currentSessionId={currentSessionId}
-        onSessionChange={setCurrentSessionId}
+        onSessionChange={(id) => switchSession(id, [])}
+        onSessionDeleted={() => setSessionRefreshKey((k) => k + 1)}
         onClose={() => setSettingsOpen(false)}
       />
       {/* ── Drift modal (portal-like, renders on top) ── */}
@@ -317,8 +599,14 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── Body (chat + history sidebar) ── */}
+      {/* ── Body (sessions sidebar + chat + history sidebar) ── */}
       <div className="flex flex-1 overflow-hidden">
+        {/* ── Sessions sidebar ── */}
+        <SessionListPanel
+          currentSessionId={currentSessionId}
+          refreshKey={sessionRefreshKey}
+          onSwitch={switchSession}
+        />
         {/* ── Chat log ── */}
         <main className="flex flex-1 flex-col overflow-hidden">
           <div className="flex-1 overflow-y-auto px-4 py-6">
@@ -331,8 +619,13 @@ export default function App() {
                   }`}
                 >
                   <div className="max-w-[85%] space-y-2">
+                    {/* Command result card */}
+                    {msg.type === "command" && msg.commandResult && (
+                      <CommandResultView result={msg.commandResult} />
+                    )}
+
                     {/* Text bubble — show when there's text and no live pipeline view */}
-                    {msg.content && !msg.pipelineEvents && (
+                    {msg.content && !msg.pipelineEvents && msg.type !== "command" && (
                       <div
                         className={`rounded-2xl px-4 py-2.5 text-sm ${
                           msg.type === "user"
@@ -371,25 +664,40 @@ export default function App() {
           <div className="border-t border-gray-800 bg-gray-900/80 px-4 py-4 backdrop-blur">
             <form
               onSubmit={handleSubmit}
-              className="mx-auto flex max-w-3xl gap-3"
+              className="mx-auto flex max-w-3xl gap-3 relative"
             >
+              {/* Slash-command hint strip — shown while the user is typing a /command */}
+              {input.startsWith("/") && !loading && (
+                <div className="absolute bottom-full left-0 right-0 mb-2">
+                  <div className="rounded-lg border border-sky-800/50 bg-gray-900 px-3 py-2 text-xs text-gray-400">
+                    <span className="mr-2 font-semibold text-sky-400">⌘</span>
+                    <span className="text-gray-300">/help</span>
+                    {" · "}<span className="text-gray-300">/cost</span>
+                    {" · "}<span className="text-gray-300">/clear</span>
+                    {" · "}<span className="text-gray-300">/rename [name]</span>
+                    {" · "}<span className="text-gray-300">/session list|use|delete</span>
+                  </div>
+                </div>
+              )}
               <input
                 className="input-text flex-1"
                 placeholder={
                   loading
                     ? "Pipeline running…"
-                    : "Describe what you'd like to build or fix…"
+                    : cmdPending
+                    ? "Command running…"
+                    : "Describe what to build, or type / for commands…"
                 }
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                disabled={loading}
+                disabled={loading || cmdPending}
               />
               <button
                 type="submit"
-                className="btn-primary"
-                disabled={loading || !input.trim()}
+                className={`btn-primary ${input.startsWith("/") ? "!bg-sky-700 hover:!bg-sky-600" : ""}`}
+                disabled={loading || cmdPending || !input.trim()}
               >
-                {loading ? "Running…" : "Run"}
+                {loading ? "Running…" : cmdPending ? "…" : input.startsWith("/") ? "Run cmd" : "Run"}
               </button>
             </form>
           </div>

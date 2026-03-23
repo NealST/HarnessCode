@@ -291,6 +291,7 @@ pub fn run() {
             commands::get_session_memory,
             commands::save_session_memory,
             commands::clear_session_memory,
+            commands::delete_session_memory,
             commands::submit_drift_decision,
             commands::submit_clarification_response,
         ])

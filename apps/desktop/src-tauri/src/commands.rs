@@ -283,6 +283,18 @@ pub async fn clear_session_memory(
     store.clear_session(&session_id).await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn delete_session_memory(
+    session_id: String,
+    project_dir: Option<String>,
+) -> Result<(), String> {
+    let project_path = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let store = FileSessionStore::for_project(project_path);
+    store.delete_session(&session_id).await.map_err(|e| e.to_string())
+}
+
 // ──────────────────────────────────────────────
 // Config commands
 // ──────────────────────────────────────────────

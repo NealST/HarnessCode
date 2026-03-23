@@ -16,6 +16,7 @@
 //! | [`tools`] | Tool registry and builtin tool implementations |
 
 pub mod agents;
+pub mod commands;
 pub mod config;
 pub mod context;
 pub mod controller;

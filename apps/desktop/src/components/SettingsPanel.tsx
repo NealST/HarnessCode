@@ -41,6 +41,7 @@ interface Props {
   open: boolean;
   currentSessionId: string;
   onSessionChange: (sessionId: string) => void;
+  onSessionDeleted?: (sessionId: string) => void;
   onClose: () => void;
 }
 
@@ -48,6 +49,7 @@ export default function SettingsPanel({
   open,
   currentSessionId,
   onSessionChange,
+  onSessionDeleted,
   onClose,
 }: Props) {
   const [maxToolTurns, setMaxToolTurns] = useState<string>("100");
@@ -140,6 +142,27 @@ export default function SettingsPanel({
       // ignore
     }
   }, [currentSessionId, persistentSummary, sessionTitle]);
+
+  const handleDeleteSession = useCallback(
+    async (sessionId: string) => {
+      if (!confirm(`Delete session "${sessionId}"? This cannot be undone.`)) return;
+      try {
+        await invoke("delete_session_memory", {
+          sessionId,
+          projectDir: null,
+        });
+        onSessionDeleted?.(sessionId);
+        if (sessionId === currentSessionId) {
+          onSessionChange("default");
+        }
+        const listedSessions = await invoke<SessionMemorySummary[]>("list_memory_sessions", { projectDir: null });
+        setSessions(listedSessions);
+      } catch {
+        // ignore
+      }
+    },
+    [currentSessionId, onSessionChange, onSessionDeleted],
+  );
 
   const handleClearSession = useCallback(async () => {
     try {
@@ -261,20 +284,32 @@ export default function SettingsPanel({
                   <p className="text-xs uppercase tracking-wide text-gray-500">Known sessions</p>
                   <div className="flex flex-wrap gap-2">
                     {sessions.map((session) => (
-                      <button
-                        key={session.session_id}
-                        onClick={() => {
-                          setSessionIdInput(session.session_id);
-                          onSessionChange(session.session_id);
-                        }}
-                        className={`rounded-md border px-2 py-1 text-xs transition ${
-                          session.session_id === currentSessionId
-                            ? "border-brand-500 bg-brand-900/30 text-brand-200"
-                            : "border-gray-700 text-gray-400 hover:bg-gray-900"
-                        }`}
-                      >
-                        {session.title || session.session_id}
-                      </button>
+                      <div key={session.session_id} className="flex items-center gap-1">
+                        <button
+                          onClick={() => {
+                            setSessionIdInput(session.session_id);
+                            onSessionChange(session.session_id);
+                          }}
+                          className={`rounded-md border px-2 py-1 text-xs transition ${
+                            session.session_id === currentSessionId
+                              ? "border-brand-500 bg-brand-900/30 text-brand-200"
+                              : "border-gray-700 text-gray-400 hover:bg-gray-900"
+                          }`}
+                        >
+                          {session.title || session.session_id}
+                        </button>
+                        {session.session_id !== currentSessionId && (
+                          <button
+                            onClick={() => handleDeleteSession(session.session_id)}
+                            className="rounded p-0.5 text-gray-600 hover:text-red-400 transition-colors"
+                            title={`Delete ${session.session_id}`}
+                          >
+                            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
                     ))}
                   </div>
                 </div>
