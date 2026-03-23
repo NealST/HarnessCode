@@ -295,6 +295,22 @@ pub async fn delete_session_memory(
     store.delete_session(&session_id).await.map_err(|e| e.to_string())
 }
 
+/// Generate (or regenerate) `AGENTS.md` in the project directory.
+///
+/// Returns `true` when a pre-existing file was overwritten, `false` on a fresh
+/// creation.  Overwrite confirmation is the caller's responsibility.
+#[tauri::command]
+pub async fn generate_agents_md(project_dir: Option<String>) -> Result<bool, String> {
+    let project_path: PathBuf = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let dest = project_path.join("AGENTS.md");
+    let existed = dest.exists();
+    let content = harnesscode_core::commands::generate_agents_md(&project_path);
+    std::fs::write(&dest, content).map_err(|e| e.to_string())?;
+    Ok(existed)
+}
+
 // ──────────────────────────────────────────────
 // Config commands
 // ──────────────────────────────────────────────

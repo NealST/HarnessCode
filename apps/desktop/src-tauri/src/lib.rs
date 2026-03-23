@@ -292,6 +292,7 @@ pub fn run() {
             commands::save_session_memory,
             commands::clear_session_memory,
             commands::delete_session_memory,
+            commands::generate_agents_md,
             commands::submit_drift_decision,
             commands::submit_clarification_response,
         ])

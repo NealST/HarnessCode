@@ -8,13 +8,13 @@
 //! harnesscode [OPTIONS]                   # interactive REPL session
 //! harnesscode config init                 # interactive config wizard
 //! harnesscode config show                 # print resolved config
-//! harnesscode context init                # auto-generate AGENTS.md
 //! ```
 //!
 //! Inside the REPL, lines beginning with `/` are treated as built-in commands:
 //!
 //! ```text
 //! /help                   show this help
+//! /init                   generate or update AGENTS.md for this project
 //! /session list           list all sessions
 //! /session use [id]       switch to a session (interactive picker if no id)
 //! /session delete <id>    delete a session
@@ -83,11 +83,6 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Generate project context files
-    Context {
-        #[command(subcommand)]
-        action: ContextAction,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -96,12 +91,6 @@ enum ConfigAction {
     Init,
     /// Print the currently resolved configuration (merged from all layers)
     Show,
-}
-
-#[derive(Subcommand, Debug)]
-enum ContextAction {
-    /// Auto-generate an AGENTS.md file for the current project
-    Init,
 }
 
 // ──────────────────────────────────────────────
@@ -346,32 +335,6 @@ fn cmd_config_show() {
 }
 
 // ──────────────────────────────────────────────
-// context init command
-// ──────────────────────────────────────────────
-
-fn cmd_context_init() {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let content = harnesscode_core::context::agents_md::generate(&cwd);
-
-    let dest = cwd.join("AGENTS.md");
-    if dest.exists() {
-        let overwrite = Confirm::new("AGENTS.md already exists. Overwrite?")
-            .with_default(false)
-            .prompt()
-            .unwrap_or(false);
-        if !overwrite {
-            println!("Aborted.");
-            return;
-        }
-    }
-
-    match std::fs::write(&dest, &content) {
-        Ok(()) => println!("✅  Generated {}", dest.display()),
-        Err(e) => eprintln!("❌  Failed to write AGENTS.md: {e}"),
-    }
-}
-
-// ──────────────────────────────────────────────
 // Formatted result display
 // ──────────────────────────────────────────────
 
@@ -562,12 +525,6 @@ async fn main() {
                 }
                 return;
             }
-            Commands::Context { action } => {
-                match action {
-                    ContextAction::Init => cmd_context_init(),
-                }
-                return;
-            }
         }
     }
 
@@ -658,6 +615,25 @@ async fn main() {
                     match store.clear_session(&current_session_id).await {
                         Ok(_) => println!("  ✅  Session '{}' history cleared.", current_session_id),
                         Err(e) => eprintln!("  ❌  Failed to clear session: {e}"),
+                    }
+                }
+
+                BuiltinCommand::Init => {
+                    let dest = cwd.join("AGENTS.md");
+                    if dest.exists() {
+                        let overwrite = Confirm::new("AGENTS.md already exists. Overwrite?")
+                            .with_default(false)
+                            .prompt()
+                            .unwrap_or(false);
+                        if !overwrite {
+                            println!("  Aborted.");
+                            continue;
+                        }
+                    }
+                    let content = harnesscode_core::commands::generate_agents_md(&cwd);
+                    match std::fs::write(&dest, &content) {
+                        Ok(()) => println!("  ✅  Generated {}", dest.display()),
+                        Err(e) => eprintln!("  ❌  Failed to write AGENTS.md: {e}"),
                     }
                 }
 

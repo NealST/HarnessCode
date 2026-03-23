@@ -15,15 +15,18 @@
 //! | [`cost`] | `/cost` |
 //! | [`rename`] | `/rename [name]` |
 //! | [`session`] | `/session list|use|delete` |
+//! | [`init`] | `/init` |
 
 mod clear;
 mod cost;
 mod exit;
 mod help;
+mod init;
 mod rename;
 mod session;
 
 pub use help::help_text;
+pub use init::generate_agents_md;
 
 // ── Token bundle passed to each sub-parser ────────────────────────────────────
 
@@ -65,6 +68,8 @@ pub enum BuiltinCommand {
     SessionUse(Option<String>),
     /// Permanently delete the named session.
     SessionDelete(String),
+    /// Generate or update the project's `AGENTS.md` context file.
+    Init,
     /// The input looked like a command but wasn't recognised.
     Unknown(String),
 }
@@ -111,6 +116,7 @@ pub fn parse_builtin(input: &str) -> Option<BuiltinCommand> {
         "cost"               => cost::parse(&t),
         "rename"             => rename::parse(&t),
         "session"            => session::parse(&t),
+        "init"               => init::parse(&t),
         other => BuiltinCommand::Unknown(format!(
             "Unknown command: /{other}. Type /help for available commands."
         )),

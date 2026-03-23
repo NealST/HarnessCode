@@ -57,6 +57,7 @@ type BuiltinCmd =
   | { tag: "help" }
   | { tag: "cost" }
   | { tag: "clear" }
+  | { tag: "init" }
   | { tag: "rename"; name: string | null }
   | { tag: "session_list" }
   | { tag: "session_use"; id: string | null }
@@ -75,6 +76,7 @@ function parseBuiltin(input: string): BuiltinCmd | null {
     case "help": case "?": return { tag: "help" };
     case "cost":            return { tag: "cost" };
     case "clear": case "reset": return { tag: "clear" };
+    case "init":            return { tag: "init" };
     case "rename": {
       const fullName = withoutSlash.slice("rename".length).trim() || null;
       return { tag: "rename", name: fullName };
@@ -100,6 +102,7 @@ const HELP_TEXT: CommandResult = {
   title: "Built-in commands",
   lines: [
     { variant: "kv", text: "/help              : Show this reference" },
+    { variant: "kv", text: "/init              : Generate or update AGENTS.md for this project" },
     { variant: "kv", text: "/cost              : Turn count + estimated token usage" },
     { variant: "kv", text: "/clear             : Wipe current session history" },
     { variant: "kv", text: "/rename [name]     : Rename current session" },
@@ -401,6 +404,17 @@ export default function App() {
             break;
           }
 
+          case "init": {
+            const existed = await invoke<boolean>("generate_agents_md", { projectDir: null });
+            pushResult({
+              command: raw,
+              status: "ok",
+              title: existed ? "AGENTS.md regenerated." : "AGENTS.md created.",
+              lines: [{ variant: "dim", text: "File written to the project directory." }],
+            });
+            break;
+          }
+
           case "unknown": {
             pushResult({ command: raw, status: "error", title: parsed.raw });
             break;
@@ -672,6 +686,7 @@ export default function App() {
                   <div className="rounded-lg border border-sky-800/50 bg-gray-900 px-3 py-2 text-xs text-gray-400">
                     <span className="mr-2 font-semibold text-sky-400">⌘</span>
                     <span className="text-gray-300">/help</span>
+                    {" · "}<span className="text-gray-300">/init</span>
                     {" · "}<span className="text-gray-300">/cost</span>
                     {" · "}<span className="text-gray-300">/clear</span>
                     {" · "}<span className="text-gray-300">/rename [name]</span>
