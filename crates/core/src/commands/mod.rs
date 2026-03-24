@@ -96,11 +96,21 @@ pub fn parse_builtin(input: &str) -> Option<BuiltinCommand> {
     }
     let without_slash = &input[1..];
 
-    // Split into at most 3 tokens: command name, arg1, remainder.
-    let mut tokens = without_slash.splitn(3, ' ');
-    let cmd_owned = tokens.next().unwrap_or("").to_lowercase();
-    let arg1 = tokens.next().map(str::trim).filter(|s| !s.is_empty());
-    let arg2 = tokens.next().map(str::trim).filter(|s| !s.is_empty());
+    // Split on runs of whitespace so that inputs with multiple consecutive
+    // spaces (e.g. `/session  delete  id`) are tokenised correctly.
+    let mut cmd_split = without_slash.splitn(2, |c: char| c.is_whitespace());
+    let cmd_raw = cmd_split.next().unwrap_or("");
+    let cmd_owned = cmd_raw.to_lowercase();
+
+    // Everything after the command name, leading whitespace stripped.
+    let after_cmd = cmd_split.next().unwrap_or("").trim_start();
+
+    // Split the remainder into arg1 + arg2 (all further tokens collapsed into arg2).
+    let mut arg_split = after_cmd.splitn(2, |c: char| c.is_whitespace());
+    let arg1_str = arg_split.next().unwrap_or("");
+    let arg1 = if arg1_str.is_empty() { None } else { Some(arg1_str) };
+    let arg2_str = arg_split.next().unwrap_or("").trim_start();
+    let arg2 = if arg2_str.is_empty() { None } else { Some(arg2_str) };
 
     let t = ParseTokens {
         cmd: &cmd_owned,
@@ -141,6 +151,42 @@ mod tests {
             parse_builtin("/foobar"),
             Some(BuiltinCommand::Unknown(_))
         ));
+    }
+
+    // ── Whitespace robustness ─────────────────────────────────────────────────
+
+    #[test]
+    fn double_space_between_cmd_and_subcommand() {
+        // Extra space between "session" and "delete" must not break parsing.
+        assert_eq!(
+            parse_builtin("/session  delete  my-id"),
+            Some(BuiltinCommand::SessionDelete("my-id".to_string())),
+        );
+    }
+
+    #[test]
+    fn double_space_session_list() {
+        assert_eq!(
+            parse_builtin("/session  list"),
+            Some(BuiltinCommand::SessionList),
+        );
+    }
+
+    #[test]
+    fn double_space_session_use() {
+        assert_eq!(
+            parse_builtin("/session  use  my-id"),
+            Some(BuiltinCommand::SessionUse(Some("my-id".to_string()))),
+        );
+    }
+
+    #[test]
+    fn leading_trailing_whitespace_ignored() {
+        assert_eq!(parse_builtin("  /help  "), Some(BuiltinCommand::Help));
+        assert_eq!(
+            parse_builtin("  /rename  My Session  "),
+            Some(BuiltinCommand::Rename(Some("My Session".to_string()))),
+        );
     }
 }
 

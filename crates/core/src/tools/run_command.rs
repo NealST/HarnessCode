@@ -146,7 +146,13 @@ impl Tool for RunCommandTool {
                 }
 
                 if combined.len() > MAX_OUTPUT_BYTES {
-                    combined.truncate(MAX_OUTPUT_BYTES);
+                    // Find the last valid UTF-8 char boundary at or before the
+                    // limit.  String::truncate panics on non-boundary indices.
+                    let end = (0..=MAX_OUTPUT_BYTES)
+                        .rev()
+                        .find(|&i| combined.is_char_boundary(i))
+                        .unwrap_or(0);
+                    combined.truncate(end);
                     combined.push_str("\n… (output truncated)");
                 }
 

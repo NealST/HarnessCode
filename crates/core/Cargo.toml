@@ -18,3 +18,5 @@ futures.workspace = true
 toml.workspace = true
 dirs.workspace = true
 uuid.workspace = true
+ignore = "0.4"
+regex = "1"

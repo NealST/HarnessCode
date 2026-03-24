@@ -82,6 +82,13 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
 
     while i < diff_lines.len() {
         let line = diff_lines[i];
+        // Skip "no newline at end of file" markers (e.g. `\ No newline at end
+        // of file`).  These are informational and must not be treated as
+        // context lines — there is no corresponding line in the original file.
+        if line.starts_with('\\') {
+            i += 1;
+            continue;
+        }
         if line.starts_with("@@") {
             // Parse @@ -old_start[,old_count] +new_start[,new_count] @@
             let old_start = parse_hunk_header(line)?;
@@ -148,6 +155,8 @@ fn apply_hunk(lines: Vec<String>, old_start: usize, hunk: &[&str]) -> Result<Vec
                 ));
             }
             orig_idx += 1; // consume — do not emit
+        } else if hunk_line.starts_with('\\') {
+            // Informational marker ("no newline at end of file") — skip.
         } else {
             // Context line: must match.
             let expected = if hunk_line.starts_with(' ') { &hunk_line[1..] } else { hunk_line };

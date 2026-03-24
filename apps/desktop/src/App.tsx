@@ -57,6 +57,7 @@ type BuiltinCmd =
   | { tag: "help" }
   | { tag: "cost" }
   | { tag: "clear" }
+  | { tag: "exit" }
   | { tag: "init" }
   | { tag: "rename"; name: string | null }
   | { tag: "session_list" }
@@ -74,6 +75,7 @@ function parseBuiltin(input: string): BuiltinCmd | null {
   const rest = parts.slice(2).join(" ") || null;
   switch (cmd) {
     case "help": case "?": return { tag: "help" };
+    case "exit": case "quit": return { tag: "exit" };
     case "cost":            return { tag: "cost" };
     case "clear": case "reset": return { tag: "clear" };
     case "init":            return { tag: "init" };
@@ -289,6 +291,15 @@ export default function App() {
         switch (parsed.tag) {
           case "help": {
             pushResult(HELP_TEXT);
+            break;
+          }
+
+          case "exit": {
+            pushResult({
+              command: raw,
+              status: "info",
+              title: "To exit, close the application window.",
+            });
             break;
           }
 
