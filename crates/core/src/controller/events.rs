@@ -62,6 +62,8 @@ pub enum PipelineEvent {
     StageCompleted { output: AgentOutput },
     /// The pipeline failed (agent error, guardrail, or max retries exceeded).
     PipelineFailed { error: String },
+    /// An agent stage was intentionally skipped by the user.
+    StageSkipped { role: AgentRole },
     /// A network or API error occurred during an LLM request.
     ///
     /// Informational — the controller may retry the stage.  Consumers should

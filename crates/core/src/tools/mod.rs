@@ -28,6 +28,7 @@ pub mod apply_diff;
 pub mod list_directory;
 pub mod search_files;
 pub mod run_command;
+pub mod invoke_skill;
 
 pub use read_file::ReadFileTool;
 pub use write_file::WriteFileTool;
@@ -35,10 +36,13 @@ pub use apply_diff::ApplyDiffTool;
 pub use list_directory::ListDirectoryTool;
 pub use search_files::SearchFilesTool;
 pub use run_command::RunCommandTool;
+pub use invoke_skill::InvokeSkillTool;
 
 use crate::llm::ToolDef;
+use crate::skills::SkillRegistry;
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ──────────────────────────────────────────────
 // Core types
@@ -110,6 +114,19 @@ impl ToolRegistry {
         r.register(ListDirectoryTool);
         r.register(SearchFilesTool);
         r.register(RunCommandTool);
+        r
+    }
+
+    /// Create a registry pre-loaded with all builtin tools **plus** the
+    /// `invoke_skill` tool backed by the given [`SkillRegistry`].
+    ///
+    /// This is the recommended constructor when skills should be available to
+    /// the model during a pipeline run.
+    pub fn with_builtins_and_skills(skills: Arc<SkillRegistry>) -> Self {
+        let mut r = Self::with_builtins();
+        if !skills.is_empty() {
+            r.register(InvokeSkillTool::new(skills));
+        }
         r
     }
 

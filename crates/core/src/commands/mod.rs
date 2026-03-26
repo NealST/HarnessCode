@@ -17,6 +17,7 @@
 //! | [`session`] | `/session list|use|delete` |
 //! | [`init`] | `/init` |
 
+mod agent;
 mod clear;
 mod cost;
 mod exit;
@@ -27,6 +28,15 @@ mod session;
 
 pub use help::help_text;
 pub use init::generate_agents_md;
+
+/// Identifies which built-in sub-agent to invoke via [`BuiltinCommand::RunAgent`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum BuiltinAgentKind {
+    /// Scope / frame the task (Scoper agent).
+    Scoper,
+    /// Compact older conversation turns in the current session (Compactor agent).
+    Compactor,
+}
 
 // ── Token bundle passed to each sub-parser ────────────────────────────────────
 
@@ -70,7 +80,20 @@ pub enum BuiltinCommand {
     SessionDelete(String),
     /// Generate or update the project's `AGENTS.md` context file.
     Init,
-    /// The input looked like a command but wasn't recognised.
+    /// Run a single built-in sub-agent directly, bypassing the full pipeline.
+    ///
+    /// `args` is the task string passed to the agent's `execute()` (may be empty
+    /// for agents that derive their input from session state, e.g. Compactor).
+    RunAgent { agent: BuiltinAgentKind, args: String },
+    /// A potentially-valid skill slash-command.  Callers should check a
+    /// [`SkillRegistry`](crate::skills::SkillRegistry) to confirm the skill
+    /// exists; show the `Unknown` message if it does not.
+    ///
+    /// `name` is the raw (lowercase) command name without the leading `/`.
+    /// `args` is everything that followed the command name (trimmed).
+    InvokeSkill { name: String, args: String },
+    /// The input looked like a command but wasn't recognised by builtins OR
+    /// skills.  Callers should display this message.
     Unknown(String),
 }
 
@@ -127,9 +150,11 @@ pub fn parse_builtin(input: &str) -> Option<BuiltinCommand> {
         "rename"             => rename::parse(&t),
         "session"            => session::parse(&t),
         "init"               => init::parse(&t),
-        other => BuiltinCommand::Unknown(format!(
-            "Unknown command: /{other}. Type /help for available commands."
-        )),
+        "scope" | "compact" => agent::parse(&t),
+        other => BuiltinCommand::InvokeSkill {
+            name: other.to_string(),
+            args: after_cmd.to_string(),
+        },
     })
 }
 
@@ -146,10 +171,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_command() {
+    fn unknown_command_becomes_invoke_skill() {
+        // Unrecognised commands are treated as potential skill invocations.
+        // Callers must check the SkillRegistry; if not found, show the Unknown message.
         assert!(matches!(
             parse_builtin("/foobar"),
-            Some(BuiltinCommand::Unknown(_))
+            Some(BuiltinCommand::InvokeSkill { name, args })
+            if name == "foobar" && args.is_empty()
+        ));
+    }
+
+    #[test]
+    fn invoke_skill_with_args() {
+        assert!(matches!(
+            parse_builtin("/my-skill arg1 arg2"),
+            Some(BuiltinCommand::InvokeSkill { name, args })
+            if name == "my-skill" && args == "arg1 arg2"
         ));
     }
 

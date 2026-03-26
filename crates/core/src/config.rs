@@ -4,8 +4,8 @@
 //! priority order (highest → lowest):
 //!
 //! 1. **Environment variables** — `HARNESSCODE_PROFILE`, `OPENAI_API_KEY`, etc.
-//! 2. **Project-level config** — `.harnesscode.toml` in the current working directory
-//! 3. **User-level config** — `~/.harnesscode/config.toml`
+//! 2. **Project-level config** — `.harness.toml` in the current working directory
+//! 3. **User-level config** — `~/.harness/config.toml`
 //! 4. **Built-in defaults** — `openai` provider, `gpt-4o` model
 //!
 //! ## Config file format
@@ -57,7 +57,7 @@ pub struct ProfileConfig {
     pub api_key: Option<String>,
 }
 
-/// Top-level structure of a `config.toml` / `.harnesscode.toml` file.
+/// Top-level structure of a `config.toml` / `.harness.toml` file.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HarnessConfig {
     /// Which profile to use when none is specified explicitly.
@@ -87,17 +87,17 @@ impl HarnessConfig {
 // ──────────────────────────────────────────────
 
 /// The well-known file name for project-level config (hidden file, added to .gitignore).
-pub const PROJECT_CONFIG_FILE: &str = ".harnesscode.toml";
+pub const PROJECT_CONFIG_FILE: &str = ".harness.toml";
 
 /// The well-known path for user-level config relative to the home directory.
-pub const USER_CONFIG_RELATIVE: &str = ".harnesscode/config.toml";
+pub const USER_CONFIG_RELATIVE: &str = ".harness/config.toml";
 
-/// Return the path to the user-level config file (`~/.harnesscode/config.toml`).
+/// Return the path to the user-level config file (`~/.harness/config.toml`).
 pub fn user_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(USER_CONFIG_RELATIVE))
 }
 
-/// Return the path to the project-level config file (`.harnesscode.toml` in cwd).
+/// Return the path to the project-level config file (`.harness.toml` in cwd).
 pub fn project_config_path() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -111,7 +111,7 @@ pub fn project_config_path() -> PathBuf {
 pub fn load_config() -> HarnessConfig {
     let mut config = HarnessConfig::default();
 
-    // Layer 1: user-level (~/.harnesscode/config.toml)
+    // Layer 1: user-level (~/.harness/config.toml)
     if let Some(path) = user_config_path() {
         if let Ok(content) = std::fs::read_to_string(&path) {
             debug!(path = %path.display(), "Loading user-level config");
@@ -121,7 +121,7 @@ pub fn load_config() -> HarnessConfig {
         }
     }
 
-    // Layer 2: project-level (.harnesscode.toml in cwd)
+    // Layer 2: project-level (.harness.toml in cwd)
     let project_path = project_config_path();
     if let Ok(content) = std::fs::read_to_string(&project_path) {
         debug!(path = %project_path.display(), "Loading project-level config");

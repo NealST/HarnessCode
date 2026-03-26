@@ -1,4 +1,4 @@
-//! [`JsonLinesSink`] — appends one JSON line per span to `.harnesscode/runs.jsonl`
+//! [`JsonLinesSink`] — appends one JSON line per span to `.harness/runs.jsonl`
 //! in the project working directory.
 
 use super::{Span, SpanSink};
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing::warn;
 
-/// Appends a JSON line for every span to `<project_dir>/.harnesscode/runs.jsonl`.
+/// Appends a JSON line for every span to `<project_dir>/.harness/runs.jsonl`.
 ///
 /// The file is created on first write; the directory is created if absent.
 /// Each line is a self-contained JSON object — the file is valid JSONL.
@@ -21,9 +21,9 @@ pub struct JsonLinesSink {
 }
 
 impl JsonLinesSink {
-    /// Open (or create) the `runs.jsonl` file under `project_dir/.harnesscode/`.
+    /// Open (or create) the `runs.jsonl` file under `project_dir/.harness/`.
     pub fn open(project_dir: impl Into<PathBuf>) -> std::io::Result<Self> {
-        let dir = project_dir.into().join(".harnesscode");
+        let dir = project_dir.into().join(".harness");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("runs.jsonl");
         let file = std::fs::OpenOptions::new()

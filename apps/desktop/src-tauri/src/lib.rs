@@ -9,10 +9,12 @@
 //! | [`commands::start_pipeline`]      | Kick off the multi-agent pipeline; streams progress via Tauri events |
 //! | [`commands::cancel_pipeline`]     | Request cancellation of the running pipeline (best-effort) |
 //! | [`commands::get_config`]          | Read the resolved configuration for the settings panel |
-//! | [`commands::save_config_profile`] | Persist a profile into `~/.harnesscode/config.toml` |
-//! | [`commands::get_run_history`]     | Read past run summaries from `.harnesscode/runs.jsonl` |
+//! | [`commands::save_config_profile`] | Persist a profile into `~/.harness/config.toml` |
+//! | [`commands::get_run_history`]     | Read past run summaries from `.harness/runs.jsonl` |
 //! | [`commands::list_memory_sessions`] | List persisted session memories for the current project |
 //! | [`commands::get_session_memory`]   | Read one persisted session memory |
+//! | [`commands::list_skills`]          | List all user-invocable skills for the project |
+//! | [`commands::invoke_skill_command`] | Render a skill body with argument substitution |
 //!
 //! ## Event flow for `start_pipeline`
 //!
@@ -295,6 +297,8 @@ pub fn run() {
             commands::generate_agents_md,
             commands::submit_drift_decision,
             commands::submit_clarification_response,
+            commands::list_skills,
+            commands::invoke_skill_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running HarnessCode desktop application");

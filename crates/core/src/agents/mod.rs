@@ -74,6 +74,10 @@ pub enum AgentError {
     /// The user requested a pipeline restart with a reinforced prompt.
     #[error("drift restart requested")]
     DriftRestart { reinforced_prompt: String },
+
+    /// A pipeline-level precondition was not met (e.g. missing session store).
+    #[error("{0}")]
+    Pipeline(String),
 }
 
 // ──────────────────────────────────────────────
@@ -96,6 +100,8 @@ pub enum AgentRole {
     Risk,
     /// Validates the output, runs tests, and decides pass/fail.
     Reviewer,
+    /// Compacts older conversation turns into a rolling summary.
+    Compactor,
 }
 
 impl fmt::Display for AgentRole {
@@ -107,6 +113,7 @@ impl fmt::Display for AgentRole {
             AgentRole::Conductor => write!(f, "Conductor"),
             AgentRole::Risk => write!(f, "Risk"),
             AgentRole::Reviewer => write!(f, "Reviewer"),
+            AgentRole::Compactor => write!(f, "Compactor"),
         }
     }
 }

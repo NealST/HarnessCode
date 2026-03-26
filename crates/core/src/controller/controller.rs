@@ -10,7 +10,9 @@
 use super::events::PipelineEvent;
 use super::guardrails::ExecutionGuard;
 use super::interaction::{ClarificationCallback, ClarificationRequest, ClarificationResolution};
+use super::interaction::{ScoperSkipCallback, ScoperSkipDecision};
 use super::request_context::RequestContext;
+use crate::commands::BuiltinAgentKind;
 use crate::agents::{
     compactor::CompactorAgent,
     drift_judge::{DriftCallback, DriftConfig, DriftJudgeAgent, DriftParams},
@@ -218,7 +220,7 @@ impl Controller {
 
     /// Run the pipeline for `prompt`, returning outputs from all executed stages.
     pub async fn run(&self, prompt: &str) -> Result<Vec<AgentOutput>, AgentError> {
-        self.run_with_request_context(&RequestContext::from_prompt(prompt), None, None, None)
+        self.run_with_request_context(&RequestContext::from_prompt(prompt), None, None, None, None)
             .await
     }
 
@@ -227,7 +229,7 @@ impl Controller {
         &self,
         request_context: &RequestContext,
     ) -> Result<Vec<AgentOutput>, AgentError> {
-        self.run_with_request_context(request_context, None, None, None).await
+        self.run_with_request_context(request_context, None, None, None, None).await
     }
 
     /// Run the pipeline, streaming [`PipelineEvent`]s to `tx` for live UI updates.
@@ -241,7 +243,7 @@ impl Controller {
         tx: Option<mpsc::Sender<PipelineEvent>>,
         drift_callback: Option<DriftCallback>,
     ) -> Result<Vec<AgentOutput>, AgentError> {
-        self.run_with_request_context(&RequestContext::from_prompt(prompt), tx, drift_callback, None)
+        self.run_with_request_context(&RequestContext::from_prompt(prompt), tx, drift_callback, None, None)
             .await
     }
 
@@ -252,6 +254,7 @@ impl Controller {
         tx: Option<mpsc::Sender<PipelineEvent>>,
         drift_callback: Option<DriftCallback>,
         clarification_callback: Option<ClarificationCallback>,
+        scoper_skip_callback: Option<ScoperSkipCallback>,
     ) -> Result<Vec<AgentOutput>, AgentError> {
         macro_rules! send {
             ($event:expr) => {
@@ -508,6 +511,23 @@ impl Controller {
         effective_prompt = effective_request_override.clone();
 
         // ── Stage 1: Scoping ──────────────────────────────────────────────
+        // Give the user a chance to skip the Scoper before the LLM call.
+        // The callback is invoked only when the Judge explicitly routed to Scoper.
+        let should_run_scoper = if should_run_scoper {
+            if let Some(ref cb) = scoper_skip_callback {
+                match cb(effective_request_override.clone()).await {
+                    ScoperSkipDecision::Skip => {
+                        send!(PipelineEvent::StageSkipped { role: AgentRole::Scoper });
+                        false
+                    }
+                    ScoperSkipDecision::Run => true,
+                }
+            } else {
+                true
+            }
+        } else {
+            false
+        };
         if should_run_scoper {
             send!(PipelineEvent::StageStarted { role: AgentRole::Scoper });
         }
@@ -525,7 +545,10 @@ impl Controller {
             Some(Err(e)) => SpanStatus::Error { message: e.to_string() },
             None => SpanStatus::Ok,
         };
-        obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Scoper, attempt: 1 }, scope_span_status, scope_tokens));
+        // Only record observability span when Scoper actually ran (not when user skipped).
+        if scope_result.is_some() {
+            obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Scoper, attempt: 1 }, scope_span_status, scope_tokens));
+        }
         let scoped = match scope_result {
             Some(Err(e)) => {
                 maybe_send_network_error!(e, AgentRole::Scoper);
@@ -543,18 +566,46 @@ impl Controller {
                 return result;
             }
             Some(Ok(o)) if !o.success => {
-                send!(PipelineEvent::PipelineFailed { error: format!("Scoper failed: {}", o.summary) });
-                result = Err(AgentError::ExecutionFailed { role: AgentRole::Scoper, message: o.summary.clone() });
-                let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
-                obs.record(pipeline_timer.finish(
-                    obs.run_id,
-                    None,
-                    SpanKind::Pipeline { prompt: prompt.clone() },
-                    pipeline_status,
-                    Some(pipeline_tokens),
+                // First attempt produced a structurally invalid scope (e.g. missing
+                // objective or empty success_criteria).  Allow one silent retry with
+                // the same input before giving up — transient LLM formatting issues
+                // should not be immediately fatal.
+                warn!("Scoper attempt 1 returned !success ({}); retrying once", o.summary);
+                let retry_timer = SpanTimer::start();
+                let retry_result = scoper.execute(&scoper_input).await;
+                let retry_tokens = retry_result.as_ref().ok().and_then(|o| o.tokens);
+                if let Some(t) = retry_tokens { pipeline_tokens.add(t); }
+                let retry_span_status = match &retry_result {
+                    Ok(o) if o.success => SpanStatus::Ok,
+                    Ok(o) => SpanStatus::Retried { reason: o.summary.clone() },
+                    Err(e) => SpanStatus::Error { message: e.to_string() },
+                };
+                obs.record(retry_timer.finish(
+                    obs.run_id, Some(pipeline_span_id),
+                    SpanKind::Stage { role: AgentRole::Scoper, attempt: 2 },
+                    retry_span_status, retry_tokens,
                 ));
-                obs.flush();
-                return result;
+                match retry_result {
+                    Err(e) => {
+                        maybe_send_network_error!(e, AgentRole::Scoper);
+                        send!(PipelineEvent::PipelineFailed { error: e.to_string() });
+                        result = Err(e);
+                        let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                        obs.record(pipeline_timer.finish(obs.run_id, None, SpanKind::Pipeline { prompt: prompt.clone() }, pipeline_status, Some(pipeline_tokens)));
+                        obs.flush();
+                        return result;
+                    }
+                    Ok(retry_o) if !retry_o.success => {
+                        let msg = format!("Scoper failed after 2 attempts: {}", retry_o.summary);
+                        send!(PipelineEvent::PipelineFailed { error: msg.clone() });
+                        result = Err(AgentError::ExecutionFailed { role: AgentRole::Scoper, message: msg });
+                        let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                        obs.record(pipeline_timer.finish(obs.run_id, None, SpanKind::Pipeline { prompt: prompt.clone() }, pipeline_status, Some(pipeline_tokens)));
+                        obs.flush();
+                        return result;
+                    }
+                    Ok(retry_o) => retry_o,
+                }
             }
             Some(Ok(o)) => o,
             None => synthetic_scope(&request_context, &effective_request_override),
@@ -615,7 +666,17 @@ impl Controller {
                         };
                         obs.record(retry_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Scoper, attempt: 2 }, retry_span_status, retry_tokens));
                         match scope_result {
-                            Some(Ok(output)) => output,
+                            Some(Ok(output)) if output.success => output,
+                            Some(Ok(output)) => {
+                                // Second Scoper call still returned !success — give up.
+                                let msg = format!("Scoper failed after clarification retry: {}", output.summary);
+                                send!(PipelineEvent::PipelineFailed { error: msg.clone() });
+                                result = Err(AgentError::ExecutionFailed { role: AgentRole::Scoper, message: msg });
+                                let pipeline_status = SpanStatus::Error { message: result.as_ref().err().map(ToString::to_string).unwrap_or_default() };
+                                obs.record(pipeline_timer.finish(obs.run_id, None, SpanKind::Pipeline { prompt: prompt.clone() }, pipeline_status, Some(pipeline_tokens)));
+                                obs.flush();
+                                return result;
+                            }
                             Some(Err(e)) => {
                                 maybe_send_network_error!(e, AgentRole::Scoper);
                                 send!(PipelineEvent::PipelineFailed { error: e.to_string() });
@@ -658,19 +719,27 @@ impl Controller {
             },
         )
         .await?;
-        send!(PipelineEvent::StageCompleted { output: scoped.clone() });
-        send!(PipelineEvent::ScopeReady {
-            task_type: scoped.payload.get("task_type").and_then(|v| v.as_str()).unwrap_or("other").to_string(),
-            objective: scoped.payload.get("objective").and_then(|v| v.as_str()).unwrap_or(prompt.as_str()).to_string(),
-            in_scope: payload_strings(&scoped.payload, "in_scope"),
-            out_of_scope: payload_strings(&scoped.payload, "out_of_scope"),
-            unknowns: payload_strings(&scoped.payload, "unknowns"),
-            success_criteria: payload_strings(&scoped.payload, "success_criteria"),
-            relevant_files: payload_strings(&scoped.payload, "relevant_files"),
-            needs_user_clarification: scoped.payload.get("needs_user_clarification").and_then(|v| v.as_bool()).unwrap_or(false),
-            clarifying_questions: payload_strings(&scoped.payload, "clarifying_questions"),
-            confidence: scoped.payload.get("confidence").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
-        });
+        // Only emit scope events when the Scoper agent actually ran.
+        // On a user-initiated skip the StageSkipped event was already sent;
+        // emitting StageCompleted/ScopeReady here would cause the CLI to print
+        // the synthetic problem frame even though the user chose to bypass it.
+        if should_run_scoper {
+            send!(PipelineEvent::StageCompleted { output: scoped.clone() });
+        }
+        if should_run_scoper {
+            send!(PipelineEvent::ScopeReady {
+                task_type: scoped.payload.get("task_type").and_then(|v| v.as_str()).unwrap_or("other").to_string(),
+                objective: scoped.payload.get("objective").and_then(|v| v.as_str()).unwrap_or(prompt.as_str()).to_string(),
+                in_scope: payload_strings(&scoped.payload, "in_scope"),
+                out_of_scope: payload_strings(&scoped.payload, "out_of_scope"),
+                unknowns: payload_strings(&scoped.payload, "unknowns"),
+                success_criteria: payload_strings(&scoped.payload, "success_criteria"),
+                relevant_files: payload_strings(&scoped.payload, "relevant_files"),
+                needs_user_clarification: scoped.payload.get("needs_user_clarification").and_then(|v| v.as_bool()).unwrap_or(false),
+                clarifying_questions: payload_strings(&scoped.payload, "clarifying_questions"),
+                confidence: scoped.payload.get("confidence").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
+            });
+        }
 
         loop {
             attempt += 1;
@@ -947,6 +1016,129 @@ impl Controller {
 }
 
 impl Controller {
+    /// Run a single built-in sub-agent directly, bypassing the full pipeline.
+    ///
+    /// Events emitted:
+    /// * [`PipelineEvent::StageStarted`] — before the agent executes.
+    /// * [`PipelineEvent::StageCompleted`] — on success.
+    /// * [`PipelineEvent::PipelineFailed`] — on error.
+    ///
+    /// For [`BuiltinAgentKind::Compactor`] the `task` argument is ignored; the
+    /// agent reads from the session store directly using `session_id`.
+    pub async fn run_single_agent(
+        &self,
+        kind: BuiltinAgentKind,
+        task: &str,
+        session_id: Option<&str>,
+        tx: Option<mpsc::Sender<PipelineEvent>>,
+    ) -> Result<AgentOutput, AgentError> {
+        macro_rules! send {
+            ($event:expr) => {
+                if let Some(ref tx) = tx {
+                    let _ = tx.send($event).await;
+                }
+            };
+        }
+
+        match kind {
+            BuiltinAgentKind::Scoper => {
+                send!(PipelineEvent::StageStarted { role: AgentRole::Scoper });
+                let obs = ObsCtx::new_run(Arc::clone(&self.obs_sink));
+                let guard = Arc::new(self.guard_template.build_scoper());
+                let sensor_registry = Arc::new(crate::tools::ToolRegistry::with_sensors());
+                let scoper = LlmScoperAgent {
+                    llm: Arc::clone(&self.llm),
+                    registry: sensor_registry,
+                    guard,
+                    obs,
+                };
+                match scoper.execute(task).await {
+                    Ok(output) => {
+                        send!(PipelineEvent::StageCompleted { output: output.clone() });
+                        Ok(output)
+                    }
+                    Err(e) => {
+                        send!(PipelineEvent::PipelineFailed { error: e.to_string() });
+                        Err(e)
+                    }
+                }
+            }
+
+            BuiltinAgentKind::Compactor => {
+                // ── Sync precondition checks (before any async work) ──────────
+                let store = match &self.memory_store {
+                    Some(s) => Arc::clone(s),
+                    None => {
+                        let msg = "Compactor requires an attached session store \
+                                   (run `harnesscode` from a project directory)."
+                            .to_string();
+                        send!(PipelineEvent::PipelineFailed { error: msg.clone() });
+                        return Err(AgentError::Pipeline(msg));
+                    }
+                };
+                let sid = match session_id {
+                    Some(id) => id.to_string(),
+                    None => {
+                        let msg = "Compactor requires a session id.".to_string();
+                        send!(PipelineEvent::PipelineFailed { error: msg.clone() });
+                        return Err(AgentError::Pipeline(msg));
+                    }
+                };
+
+                // Emit StageStarted before I/O so the spinner appears immediately.
+                send!(PipelineEvent::StageStarted { role: AgentRole::Compactor });
+
+                // ── Load snapshot ────────────────────────────────────────────
+                let snapshot = match store.get_session(&sid).await? {
+                    Some(mem) => mem,
+                    // No persisted session yet → nothing to compact.
+                    None => {
+                        let output = AgentOutput {
+                            role: AgentRole::Compactor,
+                            summary: "No conversation history to compact.".to_string(),
+                            payload: serde_json::Value::Null,
+                            success: true,
+                            tokens: None,
+                        };
+                        send!(PipelineEvent::StageCompleted { output: output.clone() });
+                        return Ok(output);
+                    }
+                };
+
+                // ── Skip if below the compaction threshold ───────────────────
+                if !crate::memory::needs_compaction(&snapshot) {
+                    let output = AgentOutput {
+                        role: AgentRole::Compactor,
+                        summary: "Session is below the compaction threshold — nothing to do."
+                            .to_string(),
+                        payload: serde_json::Value::Null,
+                        success: true,
+                        tokens: None,
+                    };
+                    send!(PipelineEvent::StageCompleted { output: output.clone() });
+                    return Ok(output);
+                }
+
+                // ── Run the LLM compaction ────────────────────────────────────
+                let compactor = CompactorAgent {
+                    llm: Arc::clone(&self.llm),
+                    store,
+                };
+                compactor.compact(&sid, snapshot).await;
+
+                let output = AgentOutput {
+                    role: AgentRole::Compactor,
+                    summary: "Session memory compacted.".to_string(),
+                    payload: serde_json::Value::Null,
+                    success: true,
+                    tokens: None,
+                };
+                send!(PipelineEvent::StageCompleted { output: output.clone() });
+                Ok(output)
+            }
+        }
+    }
+
     async fn load_session_memory(
         &self,
         request_context: &mut RequestContext,
@@ -1119,7 +1311,7 @@ mod tests {
             } else if sys.contains("expert software engineer") {
                 r#"{"diff":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-// TODO\n+// Done","files_changed":1,"explanation":"Replaced placeholder","language":"rust"}"#
             } else {
-                r#"{"approved":true,"issues":[],"security_concerns":[],"recommendation":"LGTM"}"#
+                r#"{"approved":true,"criteria_met":true,"issues":[],"security_concerns":[],"recommendation":"LGTM"}"#
             };
 
             Ok(LlmResponse {

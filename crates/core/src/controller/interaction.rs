@@ -24,3 +24,25 @@ pub type ClarificationCallback = Arc<
         + Send
         + Sync,
 >;
+
+/// Whether the user wants the Scoper agent to run or to be skipped.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScoperSkipDecision {
+    /// Run the Scoper agent to produce a full structured problem frame.
+    Run,
+    /// Skip the Scoper and use a lightweight synthetic scope so the pipeline
+    /// proceeds directly to planning.
+    Skip,
+}
+
+/// Async callback invoked by the controller just before the Scoper would
+/// start, giving the user a chance to bypass it.
+///
+/// `effective_request` is the Judge-resolved prompt shown to the user so they
+/// can make an informed decision.  Return [`ScoperSkipDecision::Skip`] to skip,
+/// [`ScoperSkipDecision::Run`] to let the Scoper proceed normally.
+pub type ScoperSkipCallback = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = ScoperSkipDecision> + Send>>
+        + Send
+        + Sync,
+>;

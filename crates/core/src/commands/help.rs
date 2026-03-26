@@ -16,6 +16,8 @@ pub fn help_text() -> String {
      \n\
      \x1b[36m  /help\x1b[0m                    Show this help\n\
      \x1b[36m  /init\x1b[0m                    Generate or update AGENTS.md for this project\n\
+     \x1b[36m  /scope <task>\x1b[0m            Run the Scoper agent on <task> standalone\n\
+     \x1b[36m  /compact\x1b[0m                 Compact older conversation turns in the current session\n\
      \x1b[36m  /session list\x1b[0m             List all saved sessions\n\
      \x1b[36m  /session use [id]\x1b[0m         Switch sessions (interactive if no id given)\n\
      \x1b[36m  /session delete <id>\x1b[0m      Permanently delete a session\n\

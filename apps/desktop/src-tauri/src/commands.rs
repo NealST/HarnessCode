@@ -18,6 +18,7 @@ use harnesscode_core::{
     },
     memory::{FileSessionStore, SessionMemory, SessionMemoryPatch, SessionMemorySummary, SessionStore},
     observability::{CompositeSink, JsonLinesSink, SpanSink},
+    skills::SkillRegistry,
 };
 use std::{path::PathBuf, sync::Arc};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -148,6 +149,7 @@ pub async fn start_pipeline(
                 Some(tx),
                 Some(drift_callback),
                 Some(clarification_callback),
+                None, // scoper_skip_callback: desktop handles skip via frontend events
             )
             .await;
         let _ = forwarder.await;
@@ -186,14 +188,14 @@ pub async fn cancel_pipeline(state: State<'_, PipelineState>) -> Result<(), Stri
     Ok(())
 }
 
-/// Read past run summaries from `<project_dir>/.harnesscode/runs.jsonl`.
+/// Read past run summaries from `<project_dir>/.harness/runs.jsonl`.
 /// Returns Pipeline-kind spans parsed into lightweight summaries, newest first.
 #[tauri::command]
 pub async fn get_run_history(project_dir: Option<String>) -> Vec<RunSummary> {
     let path: PathBuf = project_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join(".harnesscode")
+        .join(".harness")
         .join("runs.jsonl");
 
     let content = match std::fs::read_to_string(&path) {
@@ -423,4 +425,70 @@ pub async fn submit_clarification_response(
         let _ = tx.send(resolution);
     }
     Ok(())
+}
+
+// ──────────────────────────────────────────────
+// Skills API
+// ──────────────────────────────────────────────
+
+/// A lightweight skill summary sent to the frontend for autocomplete.
+#[derive(serde::Serialize)]
+pub struct SkillSummaryDto {
+    pub name: String,
+    pub description: String,
+    pub argument_hint: Option<String>,
+    pub user_invocable: bool,
+    pub disable_model_invocation: bool,
+}
+
+/// List all user-invocable skills discovered from the project directory and
+/// the user's home directory.
+#[tauri::command]
+pub async fn list_skills(project_dir: Option<String>) -> Vec<SkillSummaryDto> {
+    let project_path: PathBuf = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let registry = SkillRegistry::load(&project_path);
+    registry
+        .summaries()
+        .into_iter()
+        .map(|s| SkillSummaryDto {
+            name: s.name,
+            description: s.description,
+            argument_hint: s.argument_hint,
+            user_invocable: s.user_invocable,
+            disable_model_invocation: s.disable_model_invocation,
+        })
+        .collect()
+}
+
+/// Invoke a skill by name, returning its rendered body with argument substitution.
+///
+/// Returns `Err(message)` if the skill is not found.
+#[tauri::command]
+pub async fn invoke_skill_command(
+    name: String,
+    args: Option<String>,
+    project_dir: Option<String>,
+) -> Result<String, String> {
+    let project_path: PathBuf = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let registry = SkillRegistry::load(&project_path);
+    let skill_args = args.as_deref().unwrap_or("");
+
+    match registry.get(&name) {
+        Some(skill) => Ok(skill.render(skill_args)),
+        None => Err(format!(
+            "Skill '{name}' not found. Available skills: {}",
+            registry
+                .list_user_invocable()
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }

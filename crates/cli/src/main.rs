@@ -27,7 +27,7 @@
 use clap::{Parser, Subcommand};
 use harnesscode_core::{
     agents::{AgentOutput, AgentRole},
-    commands::{help_text, parse_builtin, BuiltinCommand},
+    commands::{help_text, parse_builtin, BuiltinAgentKind, BuiltinCommand},
     config::{
         load_config, project_config_path, user_config_path,
         HarnessConfig, ProfileConfig, PROJECT_CONFIG_FILE,
@@ -35,8 +35,10 @@ use harnesscode_core::{
     controller::{
         ClarificationCallback, ClarificationRequest, ClarificationResolution, Controller,
         PipelineEvent, RequestContext,
+        ScoperSkipCallback, ScoperSkipDecision,
     },
     memory::{FileSessionStore, SessionMemoryPatch, SessionStore},
+    skills::SkillRegistry,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::{Confirm, Select, Text};
@@ -137,8 +139,8 @@ fn cmd_config_init() {
     let is_home = cwd == home;
 
     // Default scope: project if cwd ≠ home, else user
-    let default_scope = if is_home { "User  (~/.harnesscode/config.toml)" } else { "Project (.harnesscode.toml)" };
-    let other_scope   = if is_home { "Project (.harnesscode.toml)" } else { "User  (~/.harnesscode/config.toml)" };
+    let default_scope = if is_home { "User  (~/.harness/config.toml)" } else { "Project (.harness.toml)" };
+    let other_scope   = if is_home { "Project (.harness.toml)" } else { "User  (~/.harness/config.toml)" };
 
     let scope = Select::new(
         "Where should the config be saved?",
@@ -229,7 +231,7 @@ fn cmd_config_init() {
         ensure_gitignore_entry(PROJECT_CONFIG_FILE);
 
         // Offer to also set as user-level default
-        let also_user = Confirm::new("Also save as user-level default (~/.harnesscode/config.toml)?")
+        let also_user = Confirm::new("Also save as user-level default (~/.harness/config.toml)?")
             .with_default(false)
             .prompt()
             .unwrap_or(false);
@@ -248,7 +250,7 @@ fn cmd_config_init() {
 fn write_user_config(config: &HarnessConfig) {
     if let Some(path) = user_config_path() {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("Failed to create ~/.harnesscode/");
+            std::fs::create_dir_all(parent).expect("Failed to create ~/.harness/");
         }
         std::fs::write(&path, config.to_toml())
             .expect("Failed to write user config file");
@@ -256,7 +258,7 @@ fn write_user_config(config: &HarnessConfig) {
     }
 }
 
-/// Ensure `.harnesscode.toml` appears in the project's `.gitignore`.
+/// Ensure `.harness.toml` appears in the project's `.gitignore`.
 fn ensure_gitignore_entry(entry: &str) {
     let gitignore_path = std::env::current_dir()
         .unwrap_or_default()
@@ -475,7 +477,7 @@ fn print_pipeline_result(outputs: &[AgentOutput]) {
 fn current_session_path() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".harnesscode")
+        .join(".harness")
         .join("current_session")
 }
 
@@ -545,8 +547,11 @@ async fn main() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let store: Arc<dyn SessionStore> = Arc::new(FileSessionStore::for_project(cwd.clone()));
 
+    // ── Skill registry ────────────────────────────────────────────────────────
+    let skill_registry = SkillRegistry::load(&cwd);
+
     // ── Resolve starting session ──────────────────────────────────────────────
-    // Priority: --session flag > .harnesscode/current_session file > "default"
+    // Priority: --session flag > .harness/current_session file > "default"
     let mut current_session_id = if cli.session != "default" {
         cli.session.clone()
     } else {
@@ -801,6 +806,139 @@ async fn main() {
                     }
                 }
 
+                BuiltinCommand::RunAgent { agent, args } => {
+                    let agent_label = match agent {
+                        BuiltinAgentKind::Scoper    => "Scoper",
+                        BuiltinAgentKind::Compactor => "Compactor",
+                    };
+                    if matches!(agent, BuiltinAgentKind::Scoper) && args.is_empty() {
+                        eprintln!("  ⚠️  Usage: /scope <task description>");
+                    } else {
+                        info!(agent = %agent_label, "Running single agent via CLI");
+                        println!();
+
+                        let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(16);
+                        let session_id = current_session_id.clone();
+                        let controller_clone = Arc::clone(&controller);
+                        let args_clone = args.clone();
+
+                        let handle = tokio::spawn(async move {
+                            controller_clone
+                                .run_single_agent(agent, &args_clone, Some(&session_id), Some(tx))
+                                .await
+                        });
+
+                        let mut current_pb: Option<ProgressBar> = None;
+                        while let Some(event) = rx.recv().await {
+                            match event {
+                                PipelineEvent::StageStarted { role } => {
+                                    if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                                    let (icon, label) = stage_label(role);
+                                    let pb = make_spinner(&format!("{icon}  {label}   正在处理…"));
+                                    current_pb = Some(pb);
+                                }
+                                PipelineEvent::StageCompleted { output } => {
+                                    if let Some(pb) = current_pb.take() {
+                                        let (icon, label) = stage_label(output.role);
+                                        pb.finish_with_message(format!(
+                                            "✅  {icon}  {label}   {}",
+                                            output.summary
+                                        ));
+                                    }
+                                    // Role-specific detail — no full-pipeline banner.
+                                    if output.role == AgentRole::Scoper {
+                                        println!();
+                                        if let Some(obj) = output.payload.get("objective").and_then(|v| v.as_str()) {
+                                            println!("        \x1b[1mObjective:\x1b[0m {obj}");
+                                        }
+                                        if let Some(criteria) = output.payload.get("success_criteria").and_then(|v| v.as_array()) {
+                                            for c in criteria.iter().filter_map(|v| v.as_str()) {
+                                                println!("        • {c}");
+                                            }
+                                        }
+                                        if let Some(qs) = output.payload.get("clarifying_questions").and_then(|v| v.as_array()) {
+                                            for q in qs.iter().filter_map(|v| v.as_str()) {
+                                                println!("        \x1b[33m? {q}\x1b[0m");
+                                            }
+                                        }
+                                        println!();
+                                    }
+                                }
+                                PipelineEvent::PipelineFailed { error } => {
+                                    if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                                    eprintln!("  ❌  {error}");
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                        if let Err(e) = handle.await {
+                            eprintln!("  ❌  Agent error: {e}");
+                        }
+                    }
+                }
+
+                BuiltinCommand::InvokeSkill { name, args } => {
+                    match skill_registry.get(&name) {
+                        Some(skill) => {
+                            // Render the skill body and send it as a task to the AI pipeline.
+                            let task = skill.render(&args);
+                            info!(skill = %name, "Invoking skill via CLI");
+                            println!();
+
+                            let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(16);
+                            let session_id = current_session_id.clone();
+                            let controller_clone = Arc::clone(&controller);
+
+                            let pipeline = tokio::spawn(async move {
+                                let mut request_context = RequestContext::from_prompt(task);
+                                request_context.session_id = Some(session_id);
+                                controller_clone
+                                    .run_with_request_context(
+                                        &request_context,
+                                        Some(tx),
+                                        None,
+                                        None,
+                                        None,
+                                    )
+                                    .await
+                            });
+
+                            let mut current_pb: Option<ProgressBar> = None;
+                            while let Some(event) = rx.recv().await {
+                                match event {
+                                    PipelineEvent::StageStarted { role } => {
+                                        if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                                        let (icon, label) = stage_label(role);
+                                        let pb = make_spinner(&format!("{icon}  {label}   正在处理…"));
+                                        current_pb = Some(pb);
+                                    }
+                                    PipelineEvent::StageCompleted { output } => {
+                                        if let Some(pb) = current_pb.take() {
+                                            let (icon, label) = stage_label(output.role);
+                                            pb.finish_with_message(format!("✅  {icon}  {label}   {}", output.summary));
+                                        }
+                                    }
+                                    PipelineEvent::PipelineFailed { error } => {
+                                        if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                                        eprintln!("  ❌  {error}");
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+
+                            if let Err(e) = pipeline.await {
+                                eprintln!("  ❌  Pipeline error: {e}");
+                            }
+                        }
+                        None => {
+                            eprintln!("  ⚠️  Unknown skill or command: /{name}");
+                            eprintln!("  💡  Type /help for available commands.");
+                        }
+                    }
+                }
+
                 BuiltinCommand::Unknown(msg) => {
                     eprintln!("  ⚠️  {msg}");
                 }
@@ -838,6 +976,28 @@ async fn main() {
             })
         });
 
+        let scoper_skip_callback: ScoperSkipCallback = Arc::new(move |effective_request: String| {
+            Box::pin(async move {
+                let preview: String = effective_request.chars().take(80).collect();
+                let label = format!(
+                    "🧭  Scoper will frame: '{}'{} — skip and go straight to planning?",
+                    preview,
+                    if effective_request.len() > 80 { "…" } else { "" },
+                );
+                match tokio::task::spawn_blocking(move || {
+                    Confirm::new(&label)
+                        .with_default(false)
+                        .with_help_message("Yes = skip Scoper, No = let Scoper frame the problem first")
+                        .prompt()
+                })
+                .await
+                {
+                    Ok(Ok(true)) => ScoperSkipDecision::Skip,
+                    _ => ScoperSkipDecision::Run,
+                }
+            })
+        });
+
         let pipeline = tokio::spawn(async move {
             let mut request_context = RequestContext::from_prompt(task_clone);
             request_context.session_id = Some(session_id);
@@ -847,6 +1007,7 @@ async fn main() {
                     Some(tx),
                     None,
                     Some(clarification_callback),
+                    Some(scoper_skip_callback),
                 )
                 .await
         });
@@ -859,6 +1020,7 @@ async fn main() {
                 AgentRole::Conductor => ("💻", "Conductor"),
                 AgentRole::Risk      => ("🛡️", "Risk    "),
                 AgentRole::Reviewer  => ("🔍", "Reviewer"),
+                AgentRole::Compactor => ("🗜️", "Compactor"),
             }
         }
 
@@ -871,6 +1033,11 @@ async fn main() {
                     let (icon, label) = stage_label(role);
                     let pb = make_spinner(&format!("{icon}  {label}   正在处理…"));
                     current_pb = Some(pb);
+                }
+                PipelineEvent::StageSkipped { role } => {
+                    if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                    let (icon, label) = stage_label(role);
+                    println!("  ⏭  {icon}  {label}   \x1b[2m(skipped)\x1b[0m");
                 }
                 PipelineEvent::StageCompleted { output } => {
                     if let Some(pb) = current_pb.take() {

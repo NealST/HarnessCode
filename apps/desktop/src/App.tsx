@@ -17,6 +17,18 @@ import CommandResultView, { type CommandResult } from "@/components/CommandResul
 const CURRENT_SESSION_STORAGE_KEY = "harnesscode.currentSessionId.v1";
 
 // ──────────────────────────────────────────────
+// Skills types
+// ──────────────────────────────────────────────
+
+interface SkillSummaryDto {
+  name: string;
+  description: string;
+  argument_hint: string | null;
+  user_invocable: boolean;
+  disable_model_invocation: boolean;
+}
+
+// ──────────────────────────────────────────────
 // Chat message model
 // ──────────────────────────────────────────────
 
@@ -63,6 +75,7 @@ type BuiltinCmd =
   | { tag: "session_list" }
   | { tag: "session_use"; id: string | null }
   | { tag: "session_delete"; id: string }
+  | { tag: "skill_invoke"; name: string; args: string }
   | { tag: "unknown"; raw: string };
 
 function parseBuiltin(input: string): BuiltinCmd | null {
@@ -93,8 +106,12 @@ function parseBuiltin(input: string): BuiltinCmd | null {
             : { tag: "unknown", raw: "/session delete requires a session id" };
         default: return { tag: "unknown", raw: "Unknown /session subcommand. Try /help." };
       }
-    default:
-      return { tag: "unknown", raw: `Unknown command: ${trimmed}. Type /help for available commands.` };
+    default: {
+      // Unknown builtins are treated as potential skill invocations.
+      // handleCommand resolves against the SkillRegistry via invoke_skill_command.
+      const skillArgs = parts.slice(1).join(" ");
+      return { tag: "skill_invoke", name: cmd, args: skillArgs };
+    }
   }
 }
 
@@ -112,6 +129,7 @@ const HELP_TEXT: CommandResult = {
     { variant: "kv", text: "/session use [id]  : Switch to another session" },
     { variant: "kv", text: "/session delete id : Permanently delete a session" },
     { variant: "divider", text: "" },
+    { variant: "dim", text: "Custom skills appear in autocomplete when you type /. Type /skill-name [args] to invoke." },
     { variant: "dim", text: "Anything else is sent to the AI pipeline." },
   ],
 };
@@ -229,8 +247,23 @@ export default function App() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cmdPending, setCmdPending] = useState(false);
+  // ── Skills autocomplete state ───────────────────────────────────────────────
+  const [skills, setSkills] = useState<SkillSummaryDto[]>([]);
+  const [skillHighlight, setSkillHighlight] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const unlistenRef = useRef<UnlistenFn[]>([]);
+
+  // Load skills whenever the input starts with "/"
+  useEffect(() => {
+    if (!input.startsWith("/")) {
+      setSkills([]);
+      setSkillHighlight(0);
+      return;
+    }
+    invoke<SkillSummaryDto[]>("list_skills", { projectDir: null })
+      .then(setSkills)
+      .catch(() => setSkills([]));
+  }, [input]);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -423,6 +456,33 @@ export default function App() {
               title: existed ? "AGENTS.md regenerated." : "AGENTS.md created.",
               lines: [{ variant: "dim", text: "File written to the project directory." }],
             });
+            break;
+          }
+
+          case "skill_invoke": {
+            try {
+              const rendered = await invoke<string>("invoke_skill_command", {
+                name: parsed.name,
+                args: parsed.args || null,
+                projectDir: null,
+              });
+              pushResult({
+                command: raw,
+                status: "ok",
+                title: `Skill: ${parsed.name}`,
+                lines: rendered
+                  .split("\n")
+                  .slice(0, 40) // cap display at 40 lines
+                  .map((l) => ({ variant: "body" as const, text: l })),
+              });
+            } catch (err) {
+              // Backend returned Err — the skill wasn't found
+              pushResult({
+                command: raw,
+                status: "error",
+                title: `Unknown command: /${parsed.name}. Type /help for available commands.`,
+              });
+            }
             break;
           }
 
@@ -691,20 +751,68 @@ export default function App() {
               onSubmit={handleSubmit}
               className="mx-auto flex max-w-3xl gap-3 relative"
             >
-              {/* Slash-command hint strip — shown while the user is typing a /command */}
-              {input.startsWith("/") && !loading && (
-                <div className="absolute bottom-full left-0 right-0 mb-2">
-                  <div className="rounded-lg border border-sky-800/50 bg-gray-900 px-3 py-2 text-xs text-gray-400">
-                    <span className="mr-2 font-semibold text-sky-400">⌘</span>
-                    <span className="text-gray-300">/help</span>
-                    {" · "}<span className="text-gray-300">/init</span>
-                    {" · "}<span className="text-gray-300">/cost</span>
-                    {" · "}<span className="text-gray-300">/clear</span>
-                    {" · "}<span className="text-gray-300">/rename [name]</span>
-                    {" · "}<span className="text-gray-300">/session list|use|delete</span>
+              {/* Slash-command autocomplete — shown while the user is typing a /command */}
+              {input.startsWith("/") && !loading && (() => {
+                // Extract the partial command name typed so far (after /)
+                const partial = input.slice(1).split(/\s/)[0].toLowerCase();
+
+                // Built-in commands (always shown)
+                const builtins = [
+                  { name: "help",    description: "Show built-in command reference", hint: "" },
+                  { name: "init",    description: "Generate or update AGENTS.md", hint: "" },
+                  { name: "cost",    description: "Show turn count + token usage", hint: "" },
+                  { name: "clear",   description: "Wipe current session history", hint: "" },
+                  { name: "rename",  description: "Rename current session", hint: "[name]" },
+                  { name: "session", description: "Manage sessions (list|use|delete)", hint: "list|use|delete" },
+                ];
+
+                const matchedBuiltins = partial
+                  ? builtins.filter((b) => b.name.startsWith(partial))
+                  : builtins;
+
+                const matchedSkills = partial
+                  ? skills.filter((s) => s.name.startsWith(partial))
+                  : skills;
+
+                const allItems = [
+                  ...matchedBuiltins.map((b) => ({ name: b.name, description: b.description, hint: b.hint, isSkill: false })),
+                  ...matchedSkills.map((s) => ({ name: s.name, description: s.description, hint: s.argument_hint ?? "", isSkill: true })),
+                ];
+
+                if (allItems.length === 0) return null;
+
+                return (
+                  <div className="absolute bottom-full left-0 right-0 mb-2 max-h-56 overflow-y-auto rounded-lg border border-sky-800/50 bg-gray-900 shadow-xl">
+                    {allItems.map((item, idx) => (
+                      <button
+                        key={item.name}
+                        type="button"
+                        onMouseEnter={() => setSkillHighlight(idx)}
+                        onClick={() => {
+                          setInput(`/${item.name}${item.hint ? " " : ""}`);
+                          setSkillHighlight(idx);
+                        }}
+                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors ${
+                          idx === skillHighlight ? "bg-sky-900/60" : "hover:bg-gray-800"
+                        }`}
+                      >
+                        <span className={`font-mono font-semibold ${item.isSkill ? "text-emerald-400" : "text-sky-400"}`}>
+                          /{item.name}
+                        </span>
+                        {item.hint && (
+                          <span className="text-gray-500">{item.hint}</span>
+                        )}
+                        <span className="ml-auto text-gray-500 truncate max-w-xs">
+                          {item.description}
+                        </span>
+                        {item.isSkill && (
+                          <span className="ml-1 rounded bg-emerald-900/50 px-1 text-[10px] text-emerald-400">skill</span>
+                        )}
+                      </button>
+                    ))}
                   </div>
-                </div>
-              )}
+                );
+              })()}
               <input
                 className="input-text flex-1"
                 placeholder={

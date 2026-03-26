@@ -208,7 +208,7 @@ pub struct FileSessionStore {
 impl FileSessionStore {
     pub fn for_project(project_dir: impl AsRef<Path>) -> Self {
         Self {
-            root: project_dir.as_ref().join(".harnesscode").join("memory").join("sessions"),
+            root: project_dir.as_ref().join(".harness").join("memory").join("sessions"),
         }
     }
 

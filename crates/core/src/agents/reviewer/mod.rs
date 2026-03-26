@@ -36,14 +36,17 @@ impl Agent for LlmReviewerAgent {
         let tokens = Some(TokenUsage::from(&response));
         let payload = parse_json_or_wrap(&response.content);
 
+        // Fail-safe defaults: if the LLM returns malformed JSON without these
+        // keys, we conservatively treat the review as rejected so the pipeline
+        // retries rather than silently approving broken output.
         let approved = payload
             .get("approved")
             .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(false);
         let criteria_met = payload
             .get("criteria_met")
             .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(false);
         let passed = approved && criteria_met;
         let recommendation = payload
             .get("recommendation")
