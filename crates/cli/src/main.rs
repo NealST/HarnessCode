@@ -451,7 +451,11 @@ fn print_pipeline_result(outputs: &[AgentOutput]) {
             let approved = output.payload.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
             let criteria_met = output.payload.get("criteria_met").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            let (verdict_icon, verdict_colour) = if approved { ("✅", "\x1b[32m") } else { ("❌", "\x1b[31m") };
+            let (verdict_icon, verdict_colour) = if approved && criteria_met {
+                ("✅", "\x1b[32m")
+            } else {
+                ("⚠️ ", "\x1b[33m")
+            };
             let criteria_icon = if criteria_met { "\x1b[32m✅" } else { "\x1b[31m❌" };
 
             println!("        {verdict_colour}{verdict_icon}  {}\x1b[0m", output.summary);
@@ -930,6 +934,18 @@ async fn main() {
                                             pb.finish_with_message(format!("✅  {icon}  {label}   {}", output.summary));
                                         }
                                     }
+                                    PipelineEvent::StageSkipped { role } => {
+                                        if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                                        let (icon, label) = stage_label(role);
+                                        println!("  ⏭️   {icon}  {label}   skipped");
+                                    }
+                                    PipelineEvent::StageRetrying { role, reason, attempt } => {
+                                        if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                                        let (icon, label) = stage_label(role);
+                                        eprintln!("  ⚠️   {icon}  {label}   retry (attempt {attempt}): {reason}");
+                                        let pb = make_spinner(&format!("{icon}  {label}   正在重试…"));
+                                        current_pb = Some(pb);
+                                    }
                                     PipelineEvent::RiskAssessed {
                                         risk_level, reason, affected_areas,
                                         breaking_change, security_implications, cr_focus, risk_unavailable,
@@ -1283,25 +1299,17 @@ async fn main() {
                     }
                 }
                 PipelineEvent::ReviewCompleted {
-                    approved, criteria_met, issues, security_concerns, recommendation,
+                    approved, criteria_met, issues: _, security_concerns: _, recommendation,
                 } => {
-                    let (icon, colour) = if approved {
+                    // Brief real-time summary only — full details printed by print_pipeline_result below.
+                    let (icon, colour) = if approved && criteria_met {
                         ("✅", "\x1b[32m")
+                    } else if approved {
+                        ("⚠️ ", "\x1b[33m")
                     } else {
                         ("⚠️ ", "\x1b[33m")
                     };
                     println!("        {icon}  Review: {colour}{recommendation}\x1b[0m");
-                    let criteria_icon = if criteria_met { "\x1b[32m✅" } else { "\x1b[31m❌" };
-                    println!("        {criteria_icon}  Success criteria {}\x1b[0m",
-                        if criteria_met { "met" } else { "NOT met" });
-                    if !issues.is_empty() {
-                        println!("        \x1b[33mIssues:\x1b[0m");
-                        for issue in &issues { println!("          • {issue}"); }
-                    }
-                    if !security_concerns.is_empty() {
-                        println!("        \x1b[31m🔒 Security concerns:\x1b[0m");
-                        for concern in &security_concerns { println!("          • {concern}"); }
-                    }
                     println!();
                 }
             }

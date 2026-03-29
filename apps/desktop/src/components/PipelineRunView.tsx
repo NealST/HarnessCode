@@ -63,6 +63,18 @@ export type PipelineEventDto =
   | { type: "stage_completed"; role: string; summary: string; success: boolean }
   | { type: "stage_skipped"; role: string }
   | { type: "stage_retrying"; role: string; reason: string; attempt: number }
+  | { type: "phase_started"; phase_id: number; title: string; total_phases: number }
+  | {
+      type: "phase_completed";
+      phase_id: number;
+      title: string;
+      total_phases: number;
+      explanation: string;
+      files_changed: number;
+      affected_files: string[];
+    }
+  | { type: "phase_retrying"; phase_id: number; title: string; reason: string; attempt: number }
+  | { type: "phase_failed"; phase_id: number; title: string; reason: string }
   | {
       type: "risk_assessed";
       risk_level: "low" | "medium" | "high" | "unknown";
@@ -314,22 +326,31 @@ function ReviewCard({
   const hasIssues = ev.issues.length > 0;
   const hasSecurity = ev.security_concerns.length > 0;
   const borderColor = ev.approved
-    ? hasIssues
-      ? "border-yellow-900/60"
-      : "border-green-900/40"
+    ? ev.criteria_met
+      ? hasIssues ? "border-yellow-900/60" : "border-green-900/40"
+      : "border-yellow-900/60"
     : "border-red-900/60";
   const bgColor = ev.approved
-    ? hasIssues
-      ? "bg-yellow-950/20"
-      : "bg-green-950/10"
+    ? ev.criteria_met
+      ? hasIssues ? "bg-yellow-950/20" : "bg-green-950/10"
+      : "bg-yellow-950/20"
     : "bg-red-950/20";
-  const icon = ev.approved ? (hasIssues ? "⚠️" : "✅") : "❌";
+  // Degrade to cautionary yellow when approved but criteria not fully met
+  const icon = ev.approved
+    ? ev.criteria_met
+      ? hasIssues ? "⚠️" : "✅"
+      : "⚠️"
+    : "❌";
   const labelColor = ev.approved
-    ? hasIssues
-      ? "text-yellow-400"
-      : "text-green-400"
+    ? ev.criteria_met
+      ? hasIssues ? "text-yellow-400" : "text-green-400"
+      : "text-yellow-400"
     : "text-red-400";
-  const label = ev.approved ? "APPROVED" : "CONCERNS FOUND";
+  const label = ev.approved
+    ? ev.criteria_met
+      ? "APPROVED"
+      : "APPROVED WITH CAVEATS"
+    : "CONCERNS FOUND";
 
   return (
     <div className={`mt-2 rounded-lg border ${borderColor} ${bgColor} px-4 py-3 space-y-2`}>
@@ -464,6 +485,9 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
   // Collect network error warnings
   const networkErrors: { category: string; message: string; role: string }[] =
     [];
+  // Track phase progress within the conductor stage
+  let activePhase: { id: number; title: string; total: number } | null = null;
+  const completedPhases: number[] = [];
 
   for (const ev of events) {
     if (ev.type === "stage_started") {
@@ -474,11 +498,34 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
       scopeReady = ev;
     } else if (ev.type === "plan_ready") {
       planReady = ev;
+    } else if (ev.type === "phase_started") {
+      activePhase = { id: ev.phase_id, title: ev.title, total: ev.total_phases };
+      stageStatus["conductor"] = {
+        status: "running",
+        summary: `Phase ${ev.phase_id}/${ev.total_phases}: ${ev.title}`,
+      };
+    } else if (ev.type === "phase_completed") {
+      completedPhases.push(ev.phase_id);
+      stageStatus["conductor"] = {
+        status: "running",
+        summary: `Phase ${ev.phase_id}/${ev.total_phases} done — ${ev.explanation}`,
+      };
+      if (ev.phase_id === ev.total_phases) activePhase = null;
+    } else if (ev.type === "phase_retrying") {
+      stageStatus["conductor"] = {
+        status: "running",
+        summary: `Phase ${ev.phase_id} retrying (attempt ${ev.attempt}): ${ev.reason}`,
+      };
+    } else if (ev.type === "phase_failed") {
+      stageStatus["conductor"] = { status: "failed", summary: `Phase ${ev.phase_id} failed: ${ev.reason}` };
     } else if (ev.type === "risk_assessed") {
       riskAssessed = ev;
     } else if (ev.type === "review_completed") {
       reviewCompleted = ev;
       stageStatus["reviewer"] = { status: "advisory", summary: ev.recommendation };
+    } else if (ev.type === "clarification_requested") {
+      // Handled at the App level via a separate Tauri event listener → ClarificationModal.
+      // No stageStatus update needed here.
     } else if (ev.type === "stage_skipped") {
       stageStatus[ev.role] = { status: "skipped" };
     } else if (ev.type === "stage_retrying") {
@@ -504,8 +551,9 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
     }
   }
 
+  // "advisory" counts as done for progress purposes (reviewer always finishes this way)
   const completedCount = STAGE_ORDER.filter(
-    (r) => stageStatus[r].status === "completed",
+    (r) => stageStatus[r].status === "completed" || stageStatus[r].status === "advisory" || stageStatus[r].status === "skipped",
   ).length;
   const progressPct = Math.round((completedCount / STAGE_ORDER.length) * 100);
 

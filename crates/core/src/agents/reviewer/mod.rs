@@ -146,6 +146,9 @@ fn extract_changed_files_from_code_changes(code_changes: &Value) -> BTreeSet<Str
     }
 
     // Priority 3: unified-diff header parsing (legacy / fallback).
+    // Only collect `+++ b/` (new path) lines. `--- a/` (old path) is skipped
+    // to avoid false drift alerts for renamed files — a rename produces
+    // both paths but only the new name is relevant to the plan.
     code_changes
         .get("diff")
         .and_then(|v| v.as_str())
@@ -153,7 +156,6 @@ fn extract_changed_files_from_code_changes(code_changes: &Value) -> BTreeSet<Str
             diff.lines()
                 .filter_map(|line| {
                     line.strip_prefix("+++ b/")
-                        .or_else(|| line.strip_prefix("--- a/"))
                         .filter(|&p| p != "/dev/null")
                         .map(str::to_string)
                 })
@@ -171,6 +173,8 @@ fn value_array_strings(value: &Value, key: &str) -> BTreeSet<String> {
 }
 
 /// Append a drift note to the `issues` array in the LLM payload.
+/// Skips the append if an identical message is already present (prevents
+/// duplicating an issue that the LLM itself may have already reported).
 /// Does not modify `approved`, `criteria_met`, or `recommendation` —
 /// those reflect the LLM's assessment and are advisory for the user.
 fn append_drift_issue(payload: &mut Value, issue: &str) {
@@ -182,7 +186,15 @@ fn append_drift_issue(payload: &mut Value, issue: &str) {
             .entry("issues".to_string())
             .or_insert_with(|| Value::Array(vec![]));
         match issues_value {
-            Value::Array(arr) => arr.push(Value::String(issue.to_string())),
+            Value::Array(arr) => {
+                // Deduplicate: don't append if LLM already recorded the same files.
+                let already_present = arr.iter().any(|v| {
+                    v.as_str().is_some_and(|s| s.contains(&issue[..issue.len().min(40)]))
+                });
+                if !already_present {
+                    arr.push(Value::String(issue.to_string()));
+                }
+            }
             _ => *issues_value = Value::Array(vec![Value::String(issue.to_string())]),
         }
     }

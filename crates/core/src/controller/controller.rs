@@ -1342,12 +1342,6 @@ impl Controller {
                     result = Err(e);
                     break;
                 }
-                Ok(o) if !o.success => {
-                    warn!(role = %o.role, "Reviewer rejected; retrying pipeline");
-                    send!(PipelineEvent::PipelineFailed { error: format!("Reviewer rejected: {}", o.summary) });
-                    if attempt >= self.max_retries { result = Err(AgentError::MaxRetriesExceeded(self.max_retries)); break; }
-                    continue;
-                }
                 Ok(o) => o,
             };
             send!(PipelineEvent::StageCompleted { output: review.clone() });
