@@ -1039,6 +1039,16 @@ async fn main() {
                     let (icon, label) = stage_label(role);
                     println!("  ⏭  {icon}  {label}   \x1b[2m(skipped)\x1b[0m");
                 }
+                PipelineEvent::StageRetrying { role, reason, attempt } => {
+                    // Keep the spinner running but update its message so the user
+                    // knows a retry is in progress and why the first attempt failed.
+                    let (icon, label) = stage_label(role);
+                    if let Some(ref pb) = current_pb {
+                        pb.set_message(format!(
+                            "{icon}  {label}   \x1b[33m⟳ 重试中 (attempt {attempt} failed: {reason})…\x1b[0m"
+                        ));
+                    }
+                }
                 PipelineEvent::StageCompleted { output } => {
                     if let Some(pb) = current_pb.take() {
                         let (icon, label) = stage_label(output.role);
@@ -1121,22 +1131,51 @@ async fn main() {
                     for question in &questions { println!("    ? {question}"); }
                     println!();
                 }
-                PipelineEvent::PlanReady { steps, affected_files, complexity } => {
+                PipelineEvent::PlanReady { phase_count, phases, complexity } => {
                     let complexity_colour = match complexity.as_str() {
                         "high"   => "\x1b[31m",
                         "medium" => "\x1b[33m",
                         _        => "\x1b[32m",
                     };
                     println!(
-                        "\n  📋  Execution Plan  (complexity: {complexity_colour}{}\x1b[0m)\n",
+                        "\n  📋  Execution Plan  ({phase_count} phase(s), complexity: {complexity_colour}{}\x1b[0m)\n",
                         complexity.to_uppercase()
                     );
-                    for (i, step) in steps.iter().enumerate() { println!("    {}. {step}", i + 1); }
-                    if !affected_files.is_empty() {
-                        println!("\n  📁  Files to change:");
-                        for f in &affected_files { println!("      • {f}"); }
+                    for p in &phases {
+                        println!(
+                            "    Phase {}: {}  [{} step(s), {}]",
+                            p.phase_id, p.title, p.step_count, p.complexity
+                        );
                     }
                     println!();
+                }
+                PipelineEvent::PhaseStarted { phase_id, title, total_phases } => {
+                    if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                    let pb = make_spinner(&format!(
+                        "⚙️   Phase {phase_id}/{total_phases}: {title}   正在执行…"
+                    ));
+                    current_pb = Some(pb);
+                }
+                PipelineEvent::PhaseCompleted { phase_id, title, total_phases, explanation, files_changed } => {
+                    if let Some(pb) = current_pb.take() {
+                        pb.finish_with_message(format!(
+                            "✅  Phase {phase_id}/{total_phases}: {title}   {explanation}  \x1b[2m({files_changed} file(s) changed)\x1b[0m"
+                        ));
+                    }
+                }
+                PipelineEvent::PhaseRetrying { phase_id, title, reason, attempt } => {
+                    if let Some(ref pb) = current_pb {
+                        pb.set_message(format!(
+                            "⚙️   Phase {phase_id}: {title}   \x1b[33m⟳ 重试中 (attempt {attempt} failed: {reason})…\x1b[0m"
+                        ));
+                    }
+                }
+                PipelineEvent::PhaseFailed { phase_id, title, reason } => {
+                    if let Some(pb) = current_pb.take() {
+                        pb.finish_with_message(format!(
+                            "❌  Phase {phase_id}: {title}   \x1b[31m{reason}\x1b[0m"
+                        ));
+                    }
                 }
                 PipelineEvent::PipelineFailed { error } => {
                     if let Some(pb) = current_pb.take() {

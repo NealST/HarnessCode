@@ -23,7 +23,7 @@ pub mod request_context;
 pub mod tool_loop;
 
 pub use controller::Controller;
-pub use events::PipelineEvent;
+pub use events::{PhaseSummary, PipelineEvent};
 pub use guardrails::{ExecutionGuard, GuardrailViolation, StepStatus};
 pub use interaction::{ClarificationCallback, ClarificationRequest, ClarificationResolution,
 					ScoperSkipCallback, ScoperSkipDecision};

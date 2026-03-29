@@ -23,7 +23,8 @@ use tracing::info;
 ///    actual file paths.
 ///
 /// The `guard` should be built from [`ToolRegistry::with_sensors`] limits —
-/// a lean step budget (≤ 10 turns) and a short timeout are recommended.
+/// a budget of ≤ 50 tool turns is recommended to allow deep cross-module
+/// exploration while providing a circuit-breaker against runaway loops.
 pub struct LlmPlannerAgent {
     pub llm: Arc<dyn LlmProvider>,
     pub registry: Arc<ToolRegistry>,
@@ -49,19 +50,34 @@ impl Agent for LlmPlannerAgent {
             run_tool_loop(&self.llm, messages, &self.registry, &self.guard, &self.obs, None).await?;
         let payload = parse_json_or_wrap(&text);
 
-        // A valid plan must have a non-empty `steps` array.  If the LLM returned
-        // something that couldn't be parsed as JSON (wrapped in `{"raw":"..."}`) or
-        // a JSON object without `steps`, mark the output as a failure so the
-        // controller's retry logic can kick in.
-        let steps = payload
-            .get("steps")
-            .and_then(|s| s.as_array());
-        let has_valid_plan = steps.map(|a| !a.is_empty()).unwrap_or(false);
+        // A valid plan must have a non-empty `phases` array where each phase has
+        // a non-empty `steps` array.  If anything is missing or malformed, mark the
+        // output as a failure so the controller's retry logic can kick in.
+        let phases = payload.get("phases").and_then(|p| p.as_array());
+        let has_valid_plan = phases
+            .map(|arr| {
+                !arr.is_empty()
+                    && arr.iter().all(|phase| {
+                        phase
+                            .get("steps")
+                            .and_then(|s| s.as_array())
+                            .map(|steps| !steps.is_empty())
+                            .unwrap_or(false)
+                    })
+            })
+            .unwrap_or(false);
 
         let summary = if has_valid_plan {
-            format!("Plan ready: {} step(s)", steps.unwrap().len())
+            let phase_count = phases.unwrap().len();
+            let total_steps: usize = phases
+                .unwrap()
+                .iter()
+                .filter_map(|p| p.get("steps").and_then(|s| s.as_array()))
+                .map(|s| s.len())
+                .sum();
+            format!("Plan ready: {phase_count} phase(s), {total_steps} step(s) total")
         } else {
-            "Planner did not produce a valid JSON plan".to_string()
+            "Planner did not produce a valid phased JSON plan".to_string()
         };
 
         Ok(AgentOutput {

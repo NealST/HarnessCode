@@ -30,5 +30,3 @@ apps/desktop/src-tauri/WixTools/
 *.swo
 .DS_Store
 Thumbs.db
-
-.shopk.history.json

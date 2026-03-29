@@ -60,6 +60,15 @@ pub struct PipelineState {
 // Event payload types (frontend ↔ backend contract)
 // ──────────────────────────────────────────────
 
+/// DTO for a single phase summary inside `PlanReady`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PhaseSummaryDto {
+    pub phase_id: usize,
+    pub title: String,
+    pub step_count: usize,
+    pub complexity: String,
+}
+
 /// Mirrors `PipelineEvent` for JSON serialisation to the frontend.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -99,14 +108,32 @@ pub enum PipelineEventDto {
         objective: String,
         questions: Vec<String>,
     },
-    /// The planner finished and produced an ordered action plan.
+    /// The planner finished and produced a phased execution plan.
     PlanReady {
-        steps: Vec<String>,
-        affected_files: Vec<String>,
+        phase_count: usize,
+        phases: Vec<PhaseSummaryDto>,
         complexity: String,
     },
+    /// The Conductor is starting a new execution phase.
+    PhaseStarted { phase_id: usize, title: String, total_phases: usize },
+    /// A phase completed successfully.
+    PhaseCompleted {
+        phase_id: usize,
+        title: String,
+        total_phases: usize,
+        explanation: String,
+        files_changed: usize,
+    },
+    /// A phase failed and is being retried.
+    PhaseRetrying { phase_id: usize, title: String, reason: String, attempt: usize },
+    /// A phase permanently failed.
+    PhaseFailed { phase_id: usize, title: String, reason: String },
     StageCompleted { role: String, summary: String, success: bool },
     PipelineFailed { error: String },
+    /// An agent stage was intentionally skipped by the user.
+    StageSkipped { role: String },
+    /// An agent stage failed and is being retried (in-stage, not a full pipeline retry).
+    StageRetrying { role: String, reason: String, attempt: usize },
     /// Emitted directly by the drift callback (not via the mpsc channel).
     DriftDetected { kind: String, reason: String },
     /// A network or API error occurred during an LLM request.
@@ -188,14 +215,39 @@ impl From<PipelineEvent> for PipelineEventDto {
                 objective,
                 questions,
             },
-            PipelineEvent::PlanReady { steps, affected_files, complexity } =>
-                Self::PlanReady { steps, affected_files, complexity },
+            PipelineEvent::PlanReady { phase_count, phases, complexity } =>
+                Self::PlanReady {
+                    phase_count,
+                    phases: phases.into_iter().map(|p| PhaseSummaryDto {
+                        phase_id: p.phase_id,
+                        title: p.title,
+                        step_count: p.step_count,
+                        complexity: p.complexity,
+                    }).collect(),
+                    complexity,
+                },
+            PipelineEvent::PhaseStarted { phase_id, title, total_phases } =>
+                Self::PhaseStarted { phase_id, title, total_phases },
+            PipelineEvent::PhaseCompleted { phase_id, title, total_phases, explanation, files_changed } =>
+                Self::PhaseCompleted { phase_id, title, total_phases, explanation, files_changed },
+            PipelineEvent::PhaseRetrying { phase_id, title, reason, attempt } =>
+                Self::PhaseRetrying { phase_id, title, reason, attempt },
+            PipelineEvent::PhaseFailed { phase_id, title, reason } =>
+                Self::PhaseFailed { phase_id, title, reason },
             PipelineEvent::StageCompleted { output } => Self::StageCompleted {
                 role: output.role.to_string().to_lowercase(),
                 summary: output.summary.clone(),
                 success: output.success,
             },
             PipelineEvent::PipelineFailed { error } => Self::PipelineFailed { error },
+            PipelineEvent::StageSkipped { role } => Self::StageSkipped {
+                role: role.to_string().to_lowercase(),
+            },
+            PipelineEvent::StageRetrying { role, reason, attempt } => Self::StageRetrying {
+                role: role.to_string().to_lowercase(),
+                reason,
+                attempt,
+            },
             PipelineEvent::NetworkError { category, message, role } =>
                 Self::NetworkError { category, message, role: role.to_string().to_lowercase() },
         }

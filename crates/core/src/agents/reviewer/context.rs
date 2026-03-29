@@ -16,6 +16,11 @@ A) **Goal verification (TOTE)**: Check whether the code changes actually satisfy
    implementation is incomplete or diverges from the plan, set `approved` to false and \
    explain what is missing in `issues`.
 
+C) **File-scope consistency**: Treat plan.`affected_files` as a high-confidence candidate \
+   set, not a strict whitelist. Compare it with the actual changed files in the diff. \
+   If they differ, require an explicit explanation in `code_changes.affected_files_delta_reason`. \
+   If that explanation is missing or weak, set `approved` to false and record the drift in `issues`.
+
 B) **Quality & security review**: Analyse the code for correctness, security, and quality \
    as you would in a normal code review.
 

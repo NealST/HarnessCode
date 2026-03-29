@@ -3,6 +3,15 @@
 use crate::agents::{AgentOutput, AgentRole};
 use serde::{Deserialize, Serialize};
 
+/// Lightweight summary of one phase shown in `PlanReady`.
+#[derive(Debug, Clone)]
+pub struct PhaseSummary {
+    pub phase_id: usize,
+    pub title: String,
+    pub step_count: usize,
+    pub complexity: String,
+}
+
 /// Events emitted by [`super::Controller::run_with_progress`] as the pipeline runs.
 ///
 /// Consumers receive these over a [`tokio::sync::mpsc`] channel and can drive
@@ -51,12 +60,41 @@ pub enum PipelineEvent {
     /// The Planner produced an execution plan.
     ///
     /// Emitted immediately after [`StageCompleted`] for the Planner so that
-    /// consumers (CLI, desktop UI) can display the upcoming action steps as a
-    /// todo list before the Coder starts executing.
+    /// consumers (CLI, desktop UI) can display the upcoming phases as a
+    /// structured todo list before the Conductor starts executing.
     PlanReady {
-        steps: Vec<String>,
-        affected_files: Vec<String>,
+        /// Total number of phases in the plan.
+        phase_count: usize,
+        /// Summary of each phase for UI display (phase_id, title, step count).
+        phases: Vec<PhaseSummary>,
         complexity: String,
+    },
+    /// The Conductor is starting a new execution phase.
+    PhaseStarted {
+        phase_id: usize,
+        title: String,
+        total_phases: usize,
+    },
+    /// A phase completed successfully.
+    PhaseCompleted {
+        phase_id: usize,
+        title: String,
+        total_phases: usize,
+        explanation: String,
+        files_changed: usize,
+    },
+    /// A phase failed and is being retried (in-phase retry, not a full pipeline retry).
+    PhaseRetrying {
+        phase_id: usize,
+        title: String,
+        reason: String,
+        attempt: usize,
+    },
+    /// A phase failed after all retries — the pipeline will restart or abort.
+    PhaseFailed {
+        phase_id: usize,
+        title: String,
+        reason: String,
     },
     /// An agent stage completed successfully.
     StageCompleted { output: AgentOutput },
@@ -64,6 +102,13 @@ pub enum PipelineEvent {
     PipelineFailed { error: String },
     /// An agent stage was intentionally skipped by the user.
     StageSkipped { role: AgentRole },
+    /// An agent stage failed and is being retried.
+    ///
+    /// Emitted once per in-stage retry attempt so consumers can update
+    /// their UI (e.g. change the spinner label) without clearing the stage.
+    /// `attempt` is the attempt that just failed (1-based), `reason` is the
+    /// agent's own failure summary.
+    StageRetrying { role: AgentRole, reason: String, attempt: usize },
     /// A network or API error occurred during an LLM request.
     ///
     /// Informational — the controller may retry the stage.  Consumers should

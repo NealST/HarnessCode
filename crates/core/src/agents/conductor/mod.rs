@@ -36,7 +36,7 @@ impl Agent for LlmConductorAgent {
     }
 
     async fn execute(&self, plan_context: &str) -> Result<AgentOutput, AgentError> {
-        info!(role = %AgentRole::Conductor, "Executing plan");
+        info!(role = %AgentRole::Conductor, "Executing phase");
 
         let messages = vec![
             LlmMessage::system(context::SYSTEM),
@@ -46,6 +46,14 @@ impl Agent for LlmConductorAgent {
         let (text, tokens) =
             run_tool_loop(&self.llm, messages, &self.registry, &self.guard, &self.obs, self.drift.as_ref()).await?;
         let payload = parse_json_or_wrap(&text);
+
+        // Consider the phase failed when the Conductor explicitly signals
+        // success_criteria_met = false.  Missing key defaults to true (old
+        // model behaviour) so we don't break compability when the field is absent.
+        let success_criteria_met = payload
+            .get("success_criteria_met")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
         let summary = payload
             .get("explanation")
@@ -57,7 +65,7 @@ impl Agent for LlmConductorAgent {
             role: AgentRole::Conductor,
             summary,
             payload,
-            success: true,
+            success: success_criteria_met,
             tokens: Some(tokens),
         })
     }

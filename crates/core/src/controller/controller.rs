@@ -8,6 +8,7 @@
 //! * Handles agent errors with retry strategies.
 
 use super::events::PipelineEvent;
+use super::events::PhaseSummary;
 use super::guardrails::ExecutionGuard;
 use super::interaction::{ClarificationCallback, ClarificationRequest, ClarificationResolution};
 use super::interaction::{ScoperSkipCallback, ScoperSkipDecision};
@@ -84,11 +85,12 @@ impl ExecutionGuardTemplate {
 
     /// Build a guard for the Planner's read-only exploration loop.
     ///
-    /// No step budget — the Planner only has sensor tools and cannot modify
-    /// anything, so the worst case is extra token spend (bounded by the LLM
-    /// provider's own limits).  Only dedup applies.
+    /// Capped at 50 tool turns — enough headroom for large cross-module
+    /// exploration tasks while providing a circuit-breaker against runaway
+    /// loops.  The Planner only uses sensor (read) tools so the guard's
+    /// dedup policy also applies.
     fn build_planner(&self) -> ExecutionGuard {
-        ExecutionGuard::unlimited()
+        ExecutionGuard::new(50)
     }
 
     /// Build a guard for the Scoper's read-only framing loop.
@@ -295,7 +297,6 @@ impl Controller {
         // `original_prompt` is fixed for the lifetime of this call so the judge
         // always receives the true user intent, never the reinforced variant.
         let original_prompt = prompt.clone();
-        let mut effective_prompt = original_prompt.clone();
 
         // Accumulate total tokens across all agents across all attempts.
         let mut pipeline_tokens = TokenUsage::default();
@@ -506,9 +507,9 @@ impl Controller {
                 );
             }
         };
-        // Keep effective_prompt in sync with what the Judge resolved so the
-        // Planner always receives the fully-interpreted request.
-        effective_prompt = effective_request_override.clone();
+        // Initialise the effective prompt from what the Judge resolved. On a
+        // drift-triggered restart this gets overwritten before the next Planner call.
+        let mut effective_prompt = effective_request_override.clone();
 
         // ── Stage 1: Scoping ──────────────────────────────────────────────
         // Give the user a chance to skip the Scoper before the LLM call.
@@ -745,13 +746,7 @@ impl Controller {
             attempt += 1;
             info!(attempt, "Starting pipeline run");
 
-            let guard = Arc::new(self.guard_template.build());
-
-            // Conductor's ObsCtx is a child of the pipeline span so its ToolTurn/
-            // ToolCall children nest correctly in the span tree.
-            let conductor_obs = obs.child(pipeline_span_id);
-
-            // Construct agents.
+            // Compute agents needed for this attempt.
             let planner_guard   = Arc::new(self.guard_template.build_planner());
             let planner_obs     = obs.child(pipeline_span_id);
             let planner = LlmPlannerAgent {
@@ -760,18 +755,6 @@ impl Controller {
                 guard:    planner_guard,
                 obs:      planner_obs,
             };
-            // Build drift params for the conductor if a judge and callback are available.
-            let conductor_drift = self.drift_judge.as_ref()
-                .zip(drift_callback.as_ref())
-                .map(|(judge, callback)| DriftParams {
-                    judge: Arc::clone(judge),
-                    config: self.drift_config.clone(),
-                    // Always use the immutable original prompt so the judge
-                    // sees the user's real intent even after a restart.
-                    original_prompt: original_prompt.clone(),
-                    callback: Arc::clone(callback),
-                });
-            let conductor = LlmConductorAgent { llm: Arc::clone(&self.llm), registry: Arc::clone(&self.registry), guard: Arc::clone(&guard), obs: conductor_obs, drift: conductor_drift };
             let risk_agent = LlmRiskAgent     { llm: Arc::clone(&self.llm) };
             let reviewer   = LlmReviewerAgent { llm: Arc::clone(&self.llm) };
 
@@ -801,10 +784,48 @@ impl Controller {
                     break;
                 }
                 Ok(o) if !o.success => {
-                    warn!(role = %o.role, "Planner reported failure");
-                    send!(PipelineEvent::PipelineFailed { error: format!("Planner failed: {}", o.summary) });
-                    if attempt >= self.max_retries { result = Err(AgentError::MaxRetriesExceeded(self.max_retries)); break; }
-                    continue;
+                    warn!(role = %o.role, "Planner attempt 1 returned !success ({}); retrying once", o.summary);
+                    // Notify the user that a retry is happening — the spinner stays
+                    // alive and its message is updated rather than finishing the stage.
+                    send!(PipelineEvent::StageRetrying {
+                        role: AgentRole::Planner,
+                        reason: o.summary.clone(),
+                        attempt: 1,
+                    });
+                    let retry_timer = SpanTimer::start();
+                    let retry_result = planner.execute(&planner_input).await;
+                    let retry_tokens = retry_result.as_ref().ok().and_then(|o2| o2.tokens);
+                    if let Some(t) = retry_tokens { pipeline_tokens.add(t); }
+                    let retry_span_status = match &retry_result {
+                        Ok(o2) if o2.success => SpanStatus::Ok,
+                        Ok(o2) => SpanStatus::Retried { reason: o2.summary.clone() },
+                        Err(e) => SpanStatus::Error { message: e.to_string() },
+                    };
+                    obs.record(retry_timer.finish(
+                        obs.run_id, Some(pipeline_span_id),
+                        SpanKind::Stage { role: AgentRole::Planner, attempt: 2 },
+                        retry_span_status, retry_tokens,
+                    ));
+                    match retry_result {
+                        Err(e) => {
+                            maybe_send_network_error!(e, AgentRole::Planner);
+                            send!(PipelineEvent::PipelineFailed { error: e.to_string() });
+                            result = Err(e);
+                            break;
+                        }
+                        Ok(o2) if !o2.success => {
+                            warn!(role = %o2.role, "Planner retry also failed: {}", o2.summary);
+                            send!(PipelineEvent::PipelineFailed {
+                                error: format!("Planner failed after retry: {}", o2.summary),
+                            });
+                            if attempt >= self.max_retries {
+                                result = Err(AgentError::MaxRetriesExceeded(self.max_retries));
+                                break;
+                            }
+                            continue;
+                        }
+                        Ok(o2) => o2,
+                    }
                 }
                 Ok(o) => o,
             };
@@ -813,94 +834,384 @@ impl Controller {
                 &mut session_memory,
                 SessionMemoryPatch {
                     execution_summary: Some(plan.summary.clone()),
-                    known_relevant_files: payload_strings(&plan.payload, "affected_files"),
+                    known_relevant_files: {
+                        // Collect affected_files from all phases.
+                        plan.payload
+                            .get("phases")
+                            .and_then(|p| p.as_array())
+                            .map(|phases| {
+                                phases
+                                    .iter()
+                                    .flat_map(|phase| payload_strings(phase, "affected_files"))
+                                    .collect::<std::collections::HashSet<_>>()
+                                    .into_iter()
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    },
                     last_plan: Some(plan.payload.clone()),
                     ..SessionMemoryPatch::default()
                 },
             )
             .await?;
             send!(PipelineEvent::StageCompleted { output: plan.clone() });
-            // ── Emit PlanReady so consumers can show the todo list ──────────────────
+
+            // ── Emit PlanReady so consumers can render the phase todo-list ────
             {
-                let steps: Vec<String> = plan.payload
-                    .get("steps")
-                    .and_then(|s| s.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                let phases_arr = plan.payload
+                    .get("phases")
+                    .and_then(|p| p.as_array())
+                    .cloned()
                     .unwrap_or_default();
-                if !steps.is_empty() {
-                    let affected_files: Vec<String> = plan.payload
-                        .get("affected_files")
-                        .and_then(|af| af.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-                        .unwrap_or_default();
-                    let complexity = plan.payload
-                        .get("complexity")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("medium")
-                        .to_string();
-                    send!(PipelineEvent::PlanReady { steps, affected_files, complexity });
+                let phase_count = phases_arr.len();
+                let phase_summaries: Vec<PhaseSummary> = phases_arr
+                    .iter()
+                    .map(|ph| PhaseSummary {
+                        phase_id: ph.get("phase_id").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        title: ph.get("title").and_then(|v| v.as_str()).unwrap_or("(untitled)").to_string(),
+                        step_count: ph.get("steps").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+                        complexity: ph.get("complexity").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
+                    })
+                    .collect();
+                // Overall complexity = highest phase complexity.
+                let overall_complexity = phase_summaries
+                    .iter()
+                    .max_by_key(|p| match p.complexity.as_str() {
+                        "high" => 2u8,
+                        "medium" => 1,
+                        _ => 0,
+                    })
+                    .map(|p| p.complexity.clone())
+                    .unwrap_or_else(|| "medium".to_string());
+                if phase_count > 0 {
+                    send!(PipelineEvent::PlanReady {
+                        phase_count,
+                        phases: phase_summaries,
+                        complexity: overall_complexity,
+                    });
                 }
             }
-            // ── Stage 2: Execution (Conductor) ────────────────────────────────
+
+            // ── Stage 2: Execution (Conductor) — phase-by-phase loop ──────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Conductor });
-            let stage_timer = SpanTimer::start();
-            let context_for_conductor = serde_json::json!({
-                "request_context": request_context,
-                "problem_frame": scoped.payload,
-                "plan": plan.payload,
-            }).to_string();
-            let code_result = conductor.execute(&context_for_conductor).await;
-            let code_tokens = code_result.as_ref().ok().and_then(|o| o.tokens);
-            if let Some(t) = code_tokens { pipeline_tokens.add(t); }
-            let code_span_status = match &code_result {
-                Ok(o) if o.success => SpanStatus::Ok,
-                Ok(o) => SpanStatus::Retried { reason: o.summary.clone() },
-                // Drift restart is also a retry, not an error.
-                Err(AgentError::DriftRestart { .. }) =>
-                    SpanStatus::Retried { reason: "drift restart".into() },
-                Err(e) => SpanStatus::Error { message: e.to_string() },
-            };
-            obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Conductor, attempt }, code_span_status, code_tokens));
-            let code_output = match code_result {
-                Err(AgentError::DriftAborted) => {
-                    warn!("Pipeline aborted by user after drift detection");
-                    send!(PipelineEvent::PipelineFailed {
-                        error: "Pipeline aborted by user after drift detection".into()
+
+            let phases_arr = plan.payload
+                .get("phases")
+                .and_then(|p| p.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let total_phases = phases_arr.len();
+
+            // Accumulates merged state across all completed phases.
+            let mut all_phase_outputs: Vec<serde_json::Value> = Vec::new();
+            // Maintained in lock-step with all_phase_outputs to avoid O(n²) rebuilds
+            // inside the phase loop.
+            let mut completed_phase_summaries: Vec<serde_json::Value> = Vec::new();
+            let mut conductor_failed = false;
+            let mut conductor_error: Option<AgentError> = None;
+            let mut drift_occurred = false;
+            let mut drift_reinforced_prompt: Option<String> = None;
+
+            'phases: for phase in &phases_arr {
+                let phase_id = phase.get("phase_id").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let phase_title = phase.get("title").and_then(|v| v.as_str()).unwrap_or("(untitled)").to_string();
+
+                send!(PipelineEvent::PhaseStarted {
+                    phase_id,
+                    title: phase_title.clone(),
+                    total_phases,
+                });
+
+                let global_success = plan.payload
+                    .get("global_success_criteria")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                // Drift prompt includes the current phase objective so the judge
+                // has enough context to distinguish legitimate phase work from
+                // true scope drift.
+                let phase_objective = phase
+                    .get("objective")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(phase_title.as_str());
+                let drift_prompt = format!(
+                    "{original_prompt}\n\nCurrent phase objective: {phase_objective}"
+                );
+
+                let phase_context = serde_json::json!({
+                    "effective_request": effective_prompt,
+                    "session_summary": request_context.session_state.persistent_summary,
+                    "problem_frame": scoped.payload,
+                    "global_success_criteria": global_success,
+                    "completed_phases": completed_phase_summaries,
+                    "current_phase": phase,
+                })
+                .to_string();
+
+                // Each phase gets its own fresh guard and ObsCtx child span.
+                let make_conductor = || {
+                    let g   = Arc::new(self.guard_template.build());
+                    let obs = obs.child(pipeline_span_id);
+                    let drift = self.drift_judge.as_ref()
+                        .zip(drift_callback.as_ref())
+                        .map(|(judge, callback)| DriftParams {
+                            judge: Arc::clone(judge),
+                            config: self.drift_config.clone(),
+                            original_prompt: drift_prompt.clone(),
+                            callback: Arc::clone(callback),
+                        });
+                    LlmConductorAgent {
+                        llm:      Arc::clone(&self.llm),
+                        registry: Arc::clone(&self.registry),
+                        guard:    g,
+                        obs,
+                        drift,
+                    }
+                };
+
+                // Allow one silent retry per phase (mirrors Planner retry policy).
+                // The retry receives a fresh guard so the full step budget is
+                // available, and the context is augmented with the failure reason.
+                let phase_timer = SpanTimer::start();
+                let mut phase_result = make_conductor().execute(&phase_context).await;
+                let phase1_tokens = phase_result.as_ref().ok().and_then(|o| o.tokens);
+                if let Some(t) = phase1_tokens { pipeline_tokens.add(t); }
+
+                let needs_retry = matches!(&phase_result, Ok(o) if !o.success);
+                if needs_retry {
+                    let failure_reason = phase_result.as_ref().unwrap().summary.clone();
+                    send!(PipelineEvent::PhaseRetrying {
+                        phase_id,
+                        title: phase_title.clone(),
+                        reason: failure_reason.clone(),
+                        attempt: 1,
                     });
-                    result = Err(AgentError::DriftAborted);
+                    // Build a retry context that explains why the first attempt failed.
+                    let retry_context = serde_json::json!({
+                        "effective_request": effective_prompt,
+                        "session_summary": request_context.session_state.persistent_summary,
+                        "problem_frame": scoped.payload,
+                        "global_success_criteria": global_success,
+                        "completed_phases": completed_phase_summaries,
+                        "current_phase": phase,
+                        "previous_attempt_result": {
+                            "success_criteria_met": false,
+                            "explanation": failure_reason,
+                        },
+                    })
+                    .to_string();
+                    phase_result = make_conductor().execute(&retry_context).await;
+                    let phase2_tokens = phase_result.as_ref().ok().and_then(|o| o.tokens);
+                    if let Some(t) = phase2_tokens { pipeline_tokens.add(t); }
+                }
+
+                let phase_span_status = match &phase_result {
+                    Ok(o) if o.success  => SpanStatus::Ok,
+                    // retry happened but still failed → Error, not Retried
+                    Ok(o) if needs_retry => SpanStatus::Error { message: o.summary.clone() },
+                    Ok(o)               => SpanStatus::Retried { reason: o.summary.clone() },
+                    Err(AgentError::DriftRestart { .. }) => SpanStatus::Retried { reason: "drift restart".into() },
+                    Err(e)              => SpanStatus::Error { message: e.to_string() },
+                };
+                let phase_tokens_total = phase_result.as_ref().ok().and_then(|o| o.tokens);
+                // Use phase_id as the attempt index so each phase is distinguishable
+                // in the observability log (the outer `attempt` is the pipeline-retry counter).
+                obs.record(phase_timer.finish(obs.run_id, Some(pipeline_span_id),
+                    SpanKind::Stage { role: AgentRole::Conductor, attempt: phase_id },
+                    phase_span_status, phase_tokens_total));
+
+                match phase_result {
+                    Err(AgentError::DriftAborted) => {
+                        warn!("Pipeline aborted by user after drift detection in phase {phase_id}");
+                        send!(PipelineEvent::PipelineFailed {
+                            error: "Pipeline aborted by user after drift detection".into()
+                        });
+                        conductor_error = Some(AgentError::DriftAborted);
+                        conductor_failed = true;
+                        drift_occurred = true;
+                        break 'phases;
+                    }
+                    Err(AgentError::DriftRestart { reinforced_prompt }) => {
+                        warn!("Drift restart requested during phase {phase_id}");
+                        drift_reinforced_prompt = Some(reinforced_prompt);
+                        conductor_failed = true;
+                        drift_occurred = true;
+                        break 'phases;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Conductor failed on phase {phase_id}");
+                        maybe_send_network_error!(e, AgentRole::Conductor);
+                        send!(PipelineEvent::PhaseFailed {
+                            phase_id,
+                            title: phase_title.clone(),
+                            reason: e.to_string(),
+                        });
+                        conductor_error = Some(e);
+                        conductor_failed = true;
+                        break 'phases;
+                    }
+                    Ok(o) if !o.success => {
+                        warn!("Conductor phase {phase_id} still failing after retry: {}", o.summary);
+                        send!(PipelineEvent::PhaseFailed {
+                            phase_id,
+                            title: phase_title.clone(),
+                            reason: o.summary.clone(),
+                        });
+                        send!(PipelineEvent::PipelineFailed {
+                            error: format!("Phase {phase_id} ({phase_title}) failed: {}", o.summary),
+                        });
+                        conductor_failed = true;
+                        break 'phases;
+                    }
+                    Ok(mut o) => {
+                        // Correct phase_id if the LLM returned a mismatched value.
+                        let returned_id = o.payload
+                            .get("phase_id")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        if returned_id != phase_id {
+                            warn!(
+                                returned_id,
+                                expected = phase_id,
+                                "Conductor returned wrong phase_id; correcting"
+                            );
+                            o.payload["phase_id"] = serde_json::json!(phase_id);
+                        }
+                        let files_changed = o.payload
+                            .get("files_changed")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        send!(PipelineEvent::PhaseCompleted {
+                            phase_id,
+                            title: phase_title.clone(),
+                            total_phases,
+                            explanation: o.summary.clone(),
+                            files_changed,
+                        });
+                        // Persist phase progress to session memory after each phase.
+                        self.persist_memory_patch(
+                            &request_context,
+                            &mut session_memory,
+                            SessionMemoryPatch {
+                                execution_summary: Some(format!(
+                                    "Phase {phase_id}/{total_phases} ({phase_title}): {}",
+                                    o.summary
+                                )),
+                                ..SessionMemoryPatch::default()
+                            },
+                        )
+                        .await?;
+                        completed_phase_summaries.push(serde_json::json!({
+                            "phase_id":      o.payload.get("phase_id"),
+                            "explanation":   o.payload.get("explanation"),
+                            "files_changed": o.payload.get("files_changed"),
+                        }));
+                        all_phase_outputs.push(o.payload.clone());
+                    }
+                }
+            }
+
+            // Handle conductor failure / drift before proceeding to Risk + Review.
+            if conductor_failed {
+                if drift_occurred {
+                    if let Some(reinforced_prompt) = drift_reinforced_prompt {
+                        effective_prompt = reinforced_prompt;
+                        if attempt >= self.max_retries {
+                            send!(PipelineEvent::PipelineFailed {
+                                error: "Drift restart attempted but retry limit reached".into()
+                            });
+                            result = Err(AgentError::MaxRetriesExceeded(self.max_retries));
+                            break;
+                        }
+                        send!(PipelineEvent::PipelineFailed {
+                            error: "Drift detected — restarting with reinforced prompt".into()
+                        });
+                        continue;
+                    }
+                    // DriftAborted
+                    result = Err(conductor_error.unwrap_or(AgentError::DriftAborted));
                     break;
                 }
-                Err(AgentError::DriftRestart { reinforced_prompt }) => {
-                    warn!("Drift restart requested — reinforcing prompt and retrying");
-                    effective_prompt = reinforced_prompt;
-                    if attempt >= self.max_retries {
-                        send!(PipelineEvent::PipelineFailed {
-                            error: "Drift restart attempted but retry limit reached".into()
-                        });
-                        result = Err(AgentError::MaxRetriesExceeded(self.max_retries));
-                        break;
-                    }
-                    send!(PipelineEvent::PipelineFailed {
-                        error: "Drift detected — restarting with reinforced prompt".into()
-                    });
-                    continue;
+                // Normal phase failure — consume a retry slot.
+                if attempt >= self.max_retries {
+                    result = Err(conductor_error.unwrap_or_else(|| AgentError::MaxRetriesExceeded(self.max_retries)));
+                    break;
                 }
-                Err(e) => {
-                    warn!(error = %e, "Conductor failed");
-                    maybe_send_network_error!(e, AgentRole::Conductor);
-                    send!(PipelineEvent::PipelineFailed { error: e.to_string() });
-                    if attempt >= self.max_retries { result = Err(AgentError::MaxRetriesExceeded(self.max_retries)); break; }
-                    continue;
+                continue;
+            }
+
+            send!(PipelineEvent::StageCompleted {
+                output: AgentOutput {
+                    role: AgentRole::Conductor,
+                    summary: format!("All {} phase(s) completed", total_phases),
+                    payload: serde_json::json!({
+                        "phases": all_phase_outputs,
+                        "total_phases": total_phases,
+                    }),
+                    success: true,
+                    tokens: None,
                 }
-                Ok(o) if !o.success => {
-                    warn!(role = %o.role, "Conductor reported failure");
-                    send!(PipelineEvent::PipelineFailed { error: format!("Conductor failed: {}", o.summary) });
-                    if attempt >= self.max_retries { result = Err(AgentError::MaxRetriesExceeded(self.max_retries)); break; }
-                    continue;
-                }
-                Ok(o) => o,
+            });
+
+            // Build a merged code_output for downstream Risk and Reviewer agents.
+            // Concatenate all per-phase diffs and sum file counts.
+            let merged_diff: String = all_phase_outputs
+                .iter()
+                .filter_map(|o| o.get("diff").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let merged_files_changed: u64 = all_phase_outputs
+                .iter()
+                .filter_map(|o| o.get("files_changed").and_then(|v| v.as_u64()))
+                .sum();
+            let merged_explanation: String = all_phase_outputs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, o)| {
+                    let pid = o.get("phase_id").and_then(|v| v.as_u64()).unwrap_or((i + 1) as u64);
+                    o.get("explanation")
+                        .and_then(|v| v.as_str())
+                        .map(|s| format!("Phase {pid}: {s}"))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            // Aggregate affected_files and delta_reason across all phases so the
+            // Reviewer's file-scope drift check has the data it needs.
+            let mut merged_affected_files: Vec<String> = all_phase_outputs
+                .iter()
+                .flat_map(|o| {
+                    o.get("affected_files")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                })
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            merged_affected_files.sort();
+            let merged_delta_reason: String = all_phase_outputs
+                .iter()
+                .filter_map(|o| {
+                    o.get("affected_files_delta_reason")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let code_output = AgentOutput {
+                role: AgentRole::Conductor,
+                summary: merged_explanation.clone(),
+                payload: serde_json::json!({
+                    "diff": merged_diff,
+                    "files_changed": merged_files_changed,
+                    "explanation": merged_explanation,
+                    "affected_files": merged_affected_files,
+                    "affected_files_delta_reason": merged_delta_reason,
+                    "phase_outputs": all_phase_outputs,
+                }),
+                success: true,
+                tokens: None,
             };
-            send!(PipelineEvent::StageCompleted { output: code_output.clone() });
 
             // ── Stage 3: Risk (informational, never retries) ─────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Risk });
@@ -1303,13 +1614,13 @@ mod tests {
             let content = if sys.contains("request-judging agent") {
                 r#"{"route":"scoper","route_reason_code":"needs_repository_grounding","ask_user_clarification":false,"effective_request":"Add a hello world function","decision_factors":{"goal_is_concrete":true,"constraints_are_stable":true,"history_resolves_references":false,"repository_grounding_needed":true,"prior_scope_can_be_reused":false},"skip_scoper_criteria_met":[],"missing_information":[],"clarifying_questions":[],"confidence":"high"}"#
             } else if sys.contains("planning agent") {
-                r#"{"steps":["Analyse codebase","Generate diff","Run tests"],"affected_files":["src/main.rs"],"success_criteria":"tests pass","complexity":"low"}"#
+                r#"{"phases":[{"phase_id":1,"title":"Implement hello world","objective":"Add the function","steps":["Analyse codebase","Generate diff","Run tests"],"affected_files":["src/main.rs"],"success_criteria":"tests pass","complexity":"low"}],"global_success_criteria":"all phases done","complexity":"low"}"#
             } else if sys.contains("architect and security engineer") {
                 r#"{"risk_level":"low","reason":"no significant risk detected","affected_areas":[],"breaking_change":false,"security_implications":"","cr_focus":"standard code review"}"#
             } else if sys.contains("problem-framing agent") {
                 r#"{"task_type":"feature","objective":"Add a hello world function","problem_statement":"Introduce a simple hello world function in the appropriate module","in_scope":["Rust source change"],"out_of_scope":["CLI redesign"],"constraints":[],"assumptions":[],"unknowns":[],"relevant_files":["src/main.rs"],"success_criteria":["A hello world function exists"],"needs_user_clarification":false,"clarifying_questions":[],"confidence":"high"}"#
             } else if sys.contains("expert software engineer") {
-                r#"{"diff":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-// TODO\n+// Done","files_changed":1,"explanation":"Replaced placeholder","language":"rust"}"#
+                r#"{"phase_id":1,"diff":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-// TODO\n+// Done","files_changed":1,"explanation":"Replaced placeholder","language":"rust","success_criteria_met":true,"affected_files_delta_reason":""}"#
             } else {
                 r#"{"approved":true,"criteria_met":true,"issues":[],"security_concerns":[],"recommendation":"LGTM"}"#
             };
@@ -1349,6 +1660,97 @@ mod tests {
             .unwrap();
         assert_eq!(outputs.len(), 6);
         assert!(outputs.iter().all(|o| o.success));
+    }
+
+    /// Stateful mock that drives a two-phase plan: Planner emits two phases,
+    /// and the Conductor mock returns the correct `phase_id` on each of its calls.
+    struct MultiPhaseMockLlmProvider {
+        conductor_call: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MultiPhaseMockLlmProvider {
+        fn new() -> Self {
+            Self { conductor_call: std::sync::atomic::AtomicUsize::new(0) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for MultiPhaseMockLlmProvider {
+        fn provider_name(&self) -> &str { "mock" }
+        fn model_name(&self) -> &str { "mock-model" }
+
+        async fn complete(&self, messages: &[LlmMessage]) -> Result<LlmResponse, LlmError> {
+            let sys = messages
+                .iter()
+                .find(|m| m.role == crate::llm::MessageRole::System)
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+
+            let content = if sys.contains("request-judging agent") {
+                r#"{"route":"scoper","route_reason_code":"needs_repository_grounding","ask_user_clarification":false,"effective_request":"Refactor two modules","decision_factors":{"goal_is_concrete":true,"constraints_are_stable":true,"history_resolves_references":false,"repository_grounding_needed":true,"prior_scope_can_be_reused":false},"skip_scoper_criteria_met":[],"missing_information":[],"clarifying_questions":[],"confidence":"high"}"#
+            } else if sys.contains("planning agent") {
+                r#"{"phases":[{"phase_id":1,"title":"Phase one","objective":"Do part one","steps":["Step A"],"affected_files":["src/main.rs"],"success_criteria":"part one done","complexity":"low"},{"phase_id":2,"title":"Phase two","objective":"Do part two","steps":["Step B"],"affected_files":["src/lib.rs"],"success_criteria":"part two done","complexity":"low"}],"global_success_criteria":"all done","complexity":"low"}"#
+            } else if sys.contains("architect and security engineer") {
+                r#"{"risk_level":"low","reason":"no significant risk","affected_areas":[],"breaking_change":false,"security_implications":"","cr_focus":"standard code review"}"#
+            } else if sys.contains("problem-framing agent") {
+                r#"{"task_type":"feature","objective":"Refactor two modules","problem_statement":"Refactor two modules","in_scope":["Rust"],"out_of_scope":[],"constraints":[],"assumptions":[],"unknowns":[],"relevant_files":["src/main.rs","src/lib.rs"],"success_criteria":["Done"],"needs_user_clarification":false,"clarifying_questions":[],"confidence":"high"}"#
+            } else if sys.contains("expert software engineer") {
+                let call = self.conductor_call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    r#"{"phase_id":1,"diff":"--- a/src/main.rs\n+++ b/src/main.rs","files_changed":1,"explanation":"Phase one done","language":"rust","success_criteria_met":true,"affected_files_delta_reason":""}"#
+                } else {
+                    r#"{"phase_id":2,"diff":"--- a/src/lib.rs\n+++ b/src/lib.rs","files_changed":1,"explanation":"Phase two done","language":"rust","success_criteria_met":true,"affected_files_delta_reason":""}"#
+                }
+            } else {
+                r#"{"approved":true,"criteria_met":true,"issues":[],"security_concerns":[],"recommendation":"LGTM"}"#
+            };
+
+            Ok(LlmResponse {
+                content: content.to_string(),
+                model: "mock-model".to_string(),
+                prompt_tokens: Some(80),
+                completion_tokens: Some(20),
+                total_tokens: Some(100),
+            })
+        }
+
+        async fn stream(&self, _messages: &[LlmMessage]) -> Result<ChunkStream, LlmError> {
+            Ok(Box::pin(stream::iter(vec![Ok(StreamChunk {
+                delta: "result".to_string(),
+                finished: true,
+            })])))
+        }
+
+        async fn complete_with_tools(
+            &self,
+            messages: &[LlmMessage],
+            _tools: &[ToolDef],
+        ) -> Result<LlmCompletion, LlmError> {
+            let resp = self.complete(messages).await?;
+            Ok(LlmCompletion::Done { text: resp.content, prompt_tokens: None, completion_tokens: None })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_controller_runs_two_phase_plan() {
+        let controller = Controller::new(3, Arc::new(MultiPhaseMockLlmProvider::new()));
+        let outputs = controller
+            .run("refactor two modules")
+            .await
+            .unwrap();
+        assert_eq!(outputs.len(), 6);
+        assert!(outputs.iter().all(|o| o.success));
+        // The Conductor stage output should contain both phases in order.
+        let conductor_out = outputs.iter().find(|o| o.role == AgentRole::Conductor).unwrap();
+        let phases = conductor_out.payload["phases"].as_array().unwrap();
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0]["phase_id"], 1);
+        assert_eq!(phases[1]["phase_id"], 2);
+        // The second phase should have been given the first phase's summary in completed_phases.
+        // (We cannot inspect what was passed to the LLM here, but correctness of the data
+        //  is covered by the phase_id and explanation fields being present in the output.)
+        assert_eq!(phases[0]["explanation"], "Phase one done");
+        assert_eq!(phases[1]["explanation"], "Phase two done");
     }
 
     #[tokio::test]
