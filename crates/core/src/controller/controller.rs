@@ -973,9 +973,10 @@ impl Controller {
                 // The retry receives a fresh guard so the full step budget is
                 // available, and the context is augmented with the failure reason.
                 let phase_timer = SpanTimer::start();
+                let mut phase_span_tokens = TokenUsage::default();
                 let mut phase_result = make_conductor().execute(&phase_context).await;
                 let phase1_tokens = phase_result.as_ref().ok().and_then(|o| o.tokens);
-                if let Some(t) = phase1_tokens { pipeline_tokens.add(t); }
+                if let Some(t) = phase1_tokens { pipeline_tokens.add(t); phase_span_tokens.add(t); }
 
                 let needs_retry = matches!(&phase_result, Ok(o) if !o.success);
                 if needs_retry {
@@ -1002,23 +1003,20 @@ impl Controller {
                     .to_string();
                     phase_result = make_conductor().execute(&retry_context).await;
                     let phase2_tokens = phase_result.as_ref().ok().and_then(|o| o.tokens);
-                    if let Some(t) = phase2_tokens { pipeline_tokens.add(t); }
+                    if let Some(t) = phase2_tokens { pipeline_tokens.add(t); phase_span_tokens.add(t); }
                 }
 
                 let phase_span_status = match &phase_result {
-                    Ok(o) if o.success  => SpanStatus::Ok,
-                    // retry happened but still failed → Error, not Retried
-                    Ok(o) if needs_retry => SpanStatus::Error { message: o.summary.clone() },
-                    Ok(o)               => SpanStatus::Retried { reason: o.summary.clone() },
+                    Ok(o) if o.success   => SpanStatus::Ok,
+                    Ok(o)                => SpanStatus::Error { message: o.summary.clone() },
                     Err(AgentError::DriftRestart { .. }) => SpanStatus::Retried { reason: "drift restart".into() },
-                    Err(e)              => SpanStatus::Error { message: e.to_string() },
+                    Err(e)               => SpanStatus::Error { message: e.to_string() },
                 };
-                let phase_tokens_total = phase_result.as_ref().ok().and_then(|o| o.tokens);
                 // Use phase_id as the attempt index so each phase is distinguishable
                 // in the observability log (the outer `attempt` is the pipeline-retry counter).
                 obs.record(phase_timer.finish(obs.run_id, Some(pipeline_span_id),
                     SpanKind::Stage { role: AgentRole::Conductor, attempt: phase_id },
-                    phase_span_status, phase_tokens_total));
+                    phase_span_status, Some(phase_span_tokens)));
 
                 match phase_result {
                     Err(AgentError::DriftAborted) => {
@@ -1081,12 +1079,18 @@ impl Controller {
                             .get("files_changed")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as usize;
+                        let affected_files: Vec<String> = o.payload
+                            .get("affected_files")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                            .unwrap_or_default();
                         send!(PipelineEvent::PhaseCompleted {
                             phase_id,
                             title: phase_title.clone(),
                             total_phases,
                             explanation: o.summary.clone(),
                             files_changed,
+                            affected_files,
                         });
                         // Persist phase progress to session memory after each phase.
                         self.persist_memory_patch(
@@ -1198,6 +1202,18 @@ impl Controller {
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
+            // Aggregate actual_changes across all phases so Risk receives the
+            // ground-truth write/patch history at the top level of its payload —
+            // not buried inside phase_outputs.
+            let merged_actual_changes: Vec<serde_json::Value> = all_phase_outputs
+                .iter()
+                .flat_map(|o| {
+                    o.get("actual_changes")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
             let code_output = AgentOutput {
                 role: AgentRole::Conductor,
                 summary: merged_explanation.clone(),
@@ -1207,6 +1223,7 @@ impl Controller {
                     "explanation": merged_explanation,
                     "affected_files": merged_affected_files,
                     "affected_files_delta_reason": merged_delta_reason,
+                    "actual_changes": merged_actual_changes,
                     "phase_outputs": all_phase_outputs,
                 }),
                 success: true,
@@ -1216,13 +1233,52 @@ impl Controller {
             // ── Stage 3: Risk (informational, never retries) ─────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Risk });
             let stage_timer = SpanTimer::start();
-            let risk_context = serde_json::to_string(&code_output.payload)?;
-            let risk_result = risk_agent.execute(&risk_context).await;
+            // Build a slimmed payload for Risk: omit `phase_outputs` to avoid
+            // duplicating `actual_changes` (which is already at the top level)
+            // and prevent blowing the LLM context budget on data it doesn't use.
+            let risk_payload = serde_json::json!({
+                "diff":            code_output.payload["diff"],
+                "explanation":     code_output.payload["explanation"],
+                "affected_files":  code_output.payload["affected_files"],
+                "actual_changes":  code_output.payload["actual_changes"],
+            });
+            // If there is genuinely nothing to assess, skip the LLM call and
+            // immediately emit risk_unavailable rather than letting the LLM
+            // hallucinate a "low" verdict from an empty payload.
+            let no_changes = code_output.payload["actual_changes"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(true)
+                && code_output.payload["diff"]
+                    .as_str()
+                    .map(str::is_empty)
+                    .unwrap_or(true);
+            let risk_result: Result<AgentOutput, AgentError> = if no_changes {
+                warn!("Risk skipped: no actual file changes recorded");
+                Ok(AgentOutput {
+                    role: AgentRole::Risk,
+                    summary: "[SKIPPED] No file changes to assess".to_string(),
+                    payload: serde_json::json!({
+                        "risk_level": "unknown",
+                        "reason": "No file changes were recorded for this run.",
+                        "risk_unavailable": true,
+                    }),
+                    success: false,
+                    tokens: None,
+                })
+            } else {
+                let risk_context = serde_json::to_string(&risk_payload)?;
+                risk_agent.execute(&risk_context).await
+            };
             let risk_tokens = risk_result.as_ref().ok().and_then(|o| o.tokens);
             if let Some(t) = risk_tokens { pipeline_tokens.add(t); }
-            let risk_span_status = match &risk_result {
-                Ok(_) => SpanStatus::Ok,
-                Err(e) => SpanStatus::Error { message: e.to_string() },
+            let risk_span_status = if no_changes {
+                SpanStatus::Skipped { reason: "no file changes recorded".to_string() }
+            } else {
+                match &risk_result {
+                    Ok(_) => SpanStatus::Ok,
+                    Err(e) => SpanStatus::Error { message: e.to_string() },
+                }
             };
             obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Risk, attempt }, risk_span_status, risk_tokens));
             let risk_output = risk_result.unwrap_or_else(|e| {
@@ -1230,12 +1286,33 @@ impl Controller {
                 AgentOutput {
                     role: AgentRole::Risk,
                     summary: format!("Risk assessment unavailable: {e}"),
-                    payload: serde_json::json!({ "risk_level": "unknown", "reason": e.to_string() }),
-                    success: true,
+                    payload: serde_json::json!({
+                        "risk_level": "unknown",
+                        "reason": e.to_string(),
+                        "risk_unavailable": true,
+                    }),
+                    success: false,
                     tokens: None,
                 }
             });
             send!(PipelineEvent::StageCompleted { output: risk_output.clone() });
+            // Emit a dedicated structured event so consumers don't need to parse
+            // raw JSON from the payload to display the risk assessment UI.
+            {
+                let p = &risk_output.payload;
+                send!(PipelineEvent::RiskAssessed {
+                    risk_level: p.get("risk_level").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                    reason:     p.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    affected_areas: p.get("affected_areas")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                        .unwrap_or_default(),
+                    breaking_change: p.get("breaking_change").and_then(|v| v.as_bool()).unwrap_or(false),
+                    security_implications: p.get("security_implications").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    cr_focus: p.get("cr_focus").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    risk_unavailable: p.get("risk_unavailable").and_then(|v| v.as_bool()).unwrap_or(false),
+                });
+            }
 
             // ── Stage 4: Review ──────────────────────────────────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Reviewer });
@@ -1286,6 +1363,11 @@ impl Controller {
                         effective_prompt.as_str(),
                         review.summary.as_str(),
                     )),
+                    last_risk_level: risk_output.payload
+                        .get("risk_level")
+                        .and_then(|v| v.as_str())
+                        .filter(|&s| matches!(s, "low" | "medium" | "high"))
+                        .map(str::to_string),
                     ..SessionMemoryPatch::default()
                 },
             )

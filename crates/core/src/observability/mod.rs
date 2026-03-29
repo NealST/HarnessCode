@@ -170,6 +170,8 @@ pub enum SpanStatus {
     Retried { reason: String },
     /// A guardrail violation occurred and was handled (non-fatal).
     GuardrailTriggered { violation: String },
+    /// The span was intentionally skipped (e.g. Risk bypassed because no file changes).
+    Skipped { reason: String },
 }
 
 // ──────────────────────────────────────────────

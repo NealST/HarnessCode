@@ -123,12 +123,23 @@ pub enum PipelineEventDto {
         total_phases: usize,
         explanation: String,
         files_changed: usize,
+        affected_files: Vec<String>,
     },
     /// A phase failed and is being retried.
     PhaseRetrying { phase_id: usize, title: String, reason: String, attempt: usize },
     /// A phase permanently failed.
     PhaseFailed { phase_id: usize, title: String, reason: String },
     StageCompleted { role: String, summary: String, success: bool },
+    /// Full structured output from the Risk agent.
+    RiskAssessed {
+        risk_level: String,
+        reason: String,
+        affected_areas: Vec<String>,
+        breaking_change: bool,
+        security_implications: String,
+        cr_focus: String,
+        risk_unavailable: bool,
+    },
     PipelineFailed { error: String },
     /// An agent stage was intentionally skipped by the user.
     StageSkipped { role: String },
@@ -228,8 +239,8 @@ impl From<PipelineEvent> for PipelineEventDto {
                 },
             PipelineEvent::PhaseStarted { phase_id, title, total_phases } =>
                 Self::PhaseStarted { phase_id, title, total_phases },
-            PipelineEvent::PhaseCompleted { phase_id, title, total_phases, explanation, files_changed } =>
-                Self::PhaseCompleted { phase_id, title, total_phases, explanation, files_changed },
+            PipelineEvent::PhaseCompleted { phase_id, title, total_phases, explanation, files_changed, affected_files } =>
+                Self::PhaseCompleted { phase_id, title, total_phases, explanation, files_changed, affected_files },
             PipelineEvent::PhaseRetrying { phase_id, title, reason, attempt } =>
                 Self::PhaseRetrying { phase_id, title, reason, attempt },
             PipelineEvent::PhaseFailed { phase_id, title, reason } =>
@@ -238,6 +249,13 @@ impl From<PipelineEvent> for PipelineEventDto {
                 role: output.role.to_string().to_lowercase(),
                 summary: output.summary.clone(),
                 success: output.success,
+            },
+            PipelineEvent::RiskAssessed {
+                risk_level, reason, affected_areas, breaking_change,
+                security_implications, cr_focus, risk_unavailable,
+            } => Self::RiskAssessed {
+                risk_level, reason, affected_areas, breaking_change,
+                security_implications, cr_focus, risk_unavailable,
             },
             PipelineEvent::PipelineFailed { error } => Self::PipelineFailed { error },
             PipelineEvent::StageSkipped { role } => Self::StageSkipped {

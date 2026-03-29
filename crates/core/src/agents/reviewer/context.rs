@@ -16,13 +16,13 @@ A) **Goal verification (TOTE)**: Check whether the code changes actually satisfy
    implementation is incomplete or diverges from the plan, set `approved` to false and \
    explain what is missing in `issues`.
 
+B) **Quality & security review**: Analyse the code for correctness, security, and quality \
+   as you would in a normal code review.
+
 C) **File-scope consistency**: Treat plan.`affected_files` as a high-confidence candidate \
    set, not a strict whitelist. Compare it with the actual changed files in the diff. \
    If they differ, require an explicit explanation in `code_changes.affected_files_delta_reason`. \
    If that explanation is missing or weak, set `approved` to false and record the drift in `issues`.
-
-B) **Quality & security review**: Analyse the code for correctness, security, and quality \
-   as you would in a normal code review.
 
 Respond ONLY with a valid JSON object in this exact format:
 {
@@ -42,6 +42,10 @@ Fields:
 
 Set approved to false if there are ANY critical issues, security concerns, or if \
 the success criteria are not met.
+
+If `risk_assessment.risk_unavailable` is true (risk data is absent), treat the review \
+with heightened caution: do not assume the change is low-risk. Rely entirely on your own \
+analysis of the code changes and flag any concerns you identify.
 Do not include any text outside the JSON object.";
 
 /// Build the user message for a review request.

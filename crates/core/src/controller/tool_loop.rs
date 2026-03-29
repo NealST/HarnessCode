@@ -13,9 +13,37 @@ use crate::tools::{ToolRegistry, ToolResult};
 use std::sync::Arc;
 use tracing::warn;
 
+/// Whether a file change was a full rewrite or a patch application.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeType {
+    /// `write_file` — the entire file was replaced with new content.
+    Write,
+    /// `apply_diff` — a unified diff was applied to the existing file.
+    Patch,
+}
+
+/// A record of a single file write or patch made during a tool loop execution.
+///
+/// Collected from successful `write_file` / `apply_diff` tool calls and returned
+/// alongside the final text and token usage from [`run_tool_loop`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct WrittenFile {
+    /// Path of the file that was written or patched.
+    pub path: String,
+    /// How the file was modified.
+    pub change_type: ChangeType,
+    /// Actual content written (for `write`) or unified diff applied (for `patch`).
+    /// Truncated to 5 000 characters to stay within LLM context budgets.
+    pub change: String,
+}
+
 /// Run the agentic tool loop until the LLM produces a final text response.
 ///
-/// Returns `(final_text, accumulated_token_usage)`.
+/// Returns `(final_text, accumulated_token_usage, written_files)` where
+/// `written_files` is the ordered list of [`WrittenFile`] records capturing every
+/// successful `write_file` / `apply_diff` call made during this loop, including
+/// the actual content or diff for downstream risk analysis.
 ///
 /// ## Guardrail enforcement order (each iteration)
 /// 1. `increment_turns`       — step budget (only on `NeedTools`)
@@ -37,10 +65,14 @@ pub async fn run_tool_loop(
     guard: &ExecutionGuard,
     obs: &ObsCtx,
     drift: Option<&DriftParams>,
-) -> Result<(String, TokenUsage), AgentError> {
+) -> Result<(String, TokenUsage, Vec<WrittenFile>), AgentError> {
     let mut turn = 0usize;
     let mut total_tokens = TokenUsage::default();
     let mut turn_summaries: Vec<TurnSummary> = Vec::new();
+    // Ordered record of every successful write_file / apply_diff call.
+    // Preserves full history so Risk can see all changes, including multiple
+    // edits to the same file within one phase.
+    let mut written_files: Vec<WrittenFile> = Vec::new();
 
     loop {
         // Call the LLM.  On network/API failure, record an observability span
@@ -70,7 +102,7 @@ pub async fn run_tool_loop(
                     prompt_tokens.unwrap_or(0),
                     completion_tokens.unwrap_or(0),
                 ));
-                return Ok((text, total_tokens));
+                return Ok((text, total_tokens, written_files));
             }
 
             LlmCompletion::NeedTools { calls: raw_calls, prompt_tokens, completion_tokens } => {
@@ -110,6 +142,35 @@ pub async fn run_tool_loop(
                 for (idx, call_timer, outcome) in dispatched {
                     let call = &calls[idx];
                     let is_err = outcome.is_error;
+                    // Track files written or patched by actuator tools,
+                    // capturing the actual content / diff for Risk analysis.
+                    if !is_err {
+                        if call.name == "write_file" {
+                            if let (Some(path), Some(content)) = (
+                                call.arguments["path"].as_str(),
+                                call.arguments["content"].as_str(),
+                            ) {
+                                let change: String = content.chars().take(5_000).collect();
+                                written_files.push(WrittenFile {
+                                    path: path.to_string(),
+                                    change_type: ChangeType::Write,
+                                    change,
+                                });
+                            }
+                        } else if call.name == "apply_diff" {
+                            if let (Some(path), Some(diff)) = (
+                                call.arguments["path"].as_str(),
+                                call.arguments["diff"].as_str(),
+                            ) {
+                                let change: String = diff.chars().take(5_000).collect();
+                                written_files.push(WrittenFile {
+                                    path: path.to_string(),
+                                    change_type: ChangeType::Patch,
+                                    change,
+                                });
+                            }
+                        }
+                    }
                     obs.record(call_timer.finish(
                         obs.run_id,
                         Some(turn_span_id),

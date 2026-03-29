@@ -36,20 +36,47 @@ impl Agent for LlmRiskAgent {
         let tokens = Some(TokenUsage::from(&response));
         let payload = parse_json_or_wrap(&response.content);
 
-        let risk_level = payload
+        // Non-JSON response: avoid false-negative "low risk" from a malformed reply.
+        if payload.get("raw").is_some() {
+            let preview: String = payload["raw"].as_str().unwrap_or("").chars().take(200).collect();
+            return Ok(AgentOutput {
+                role: AgentRole::Risk,
+                summary: format!("[PARSE_ERROR] Risk agent returned non-JSON: {preview}"),
+                payload: serde_json::json!({
+                    "risk_level": "unknown",
+                    "reason": "Risk agent failed to produce a valid JSON response.",
+                    "risk_unavailable": true,
+                }),
+                success: false,
+                tokens,
+            });
+        }
+
+        let risk_level_raw = payload
             .get("risk_level")
             .and_then(|v| v.as_str())
-            .unwrap_or("low");
+            .unwrap_or("unknown");
+        // Normalise to the allowed set so downstream consumers can rely on a
+        // closed enum. An unrecognised value is mapped to "unknown" rather than
+        // silently producing a wrong colour / badge in the UI.
+        let risk_level = match risk_level_raw {
+            "low" | "medium" | "high" => risk_level_raw,
+            _ => "unknown",
+        };
         let reason = payload
             .get("reason")
             .and_then(|v| v.as_str())
-            .unwrap_or("no significant risk detected");
+            .unwrap_or("no reason provided");
+
+        // If the LLM returned an unrecognised risk_level we treat it as
+        // a soft failure so callers can detect the degraded state.
+        let success = risk_level != "unknown";
 
         Ok(AgentOutput {
             role: AgentRole::Risk,
             summary: format!("[{}] {}", risk_level.to_uppercase(), reason),
             payload,
-            success: true,
+            success,
             tokens,
         })
     }

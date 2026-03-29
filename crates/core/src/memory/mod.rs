@@ -77,6 +77,10 @@ pub struct SessionMemory {
     /// cost of older turns exceeds `COMPACTION_TRIGGER_TOKENS`.
     #[serde(default)]
     pub compacted_summary: Option<String>,
+    /// Risk level recorded after the most recent successful pipeline run.
+    /// One of `"low"`, `"medium"`, `"high"`, or `None` if never assessed.
+    #[serde(default)]
+    pub last_risk_level: Option<String>,
     pub created_at_secs: u64,
     pub updated_at_secs: u64,
 }
@@ -97,6 +101,7 @@ impl SessionMemory {
             last_plan: None,
             conversation_turns: Vec::new(),
             compacted_summary: None,
+            last_risk_level: None,
             created_at_secs: now,
             updated_at_secs: now,
         }
@@ -143,6 +148,10 @@ pub struct SessionMemoryPatch {
     /// update are applied to the freshest on-disk state — avoiding a
     /// read-modify-write race with concurrent controller saves.
     pub compaction: Option<CompactionPatch>,
+    /// Risk level from the completed pipeline run (`"low"`, `"medium"`, or `"high"`).
+    /// `None` means the risk stage was skipped or unavailable; the stored value is unchanged.
+    #[serde(default)]
+    pub last_risk_level: Option<String>,
 }
 
 impl SessionMemoryPatch {
@@ -159,6 +168,7 @@ impl SessionMemoryPatch {
             && self.new_conversation_turn.is_none()
             && self.compacted_summary.is_none()
             && self.compaction.is_none()
+            && self.last_risk_level.is_none()
     }
 }
 
@@ -362,6 +372,9 @@ pub fn apply_patch(memory: &mut SessionMemory, patch: SessionMemoryPatch) {
     }
     if let Some(summary) = patch.compacted_summary {
         memory.compacted_summary = Some(summary);
+    }
+    if let Some(level) = patch.last_risk_level {
+        memory.last_risk_level = Some(level);
     }
     if let Some(c) = patch.compaction {
         // Drain all turns up to and including the timestamp boundary.

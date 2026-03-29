@@ -154,8 +154,9 @@ HarnessCode/
 │   ├── core/               # Library: shared engine & brain
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── multi_agent/   # Agent traits + Controller
-│   │       ├── risk_management/
+│   │       ├── agents/        # Agent trait + concrete implementations
+│   │       ├── controller/    # Cybernetic Controller, guardrails, events
+│   │       ├── tools/         # Tool registry and built-in tools
 │   │       └── context/
 │   │
 │   └── cli/                # Binary: Terminal UI entry point

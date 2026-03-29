@@ -32,7 +32,7 @@ impl Agent for LlmScoperAgent {
             LlmMessage::user(context::user_message(task)),
         ];
 
-        let (text, tokens) =
+        let (text, tokens, _) =
             run_tool_loop(&self.llm, messages, &self.registry, &self.guard, &self.obs, None).await?;
         let payload = parse_json_or_wrap(&text);
 

@@ -17,10 +17,17 @@ for this phase — do not jump ahead to future phases.
 4. Once all steps in this phase are done and verified, respond with a JSON summary.
 
 ## File scope policy
-- Treat phase.affected_files as a high-confidence candidate set, not a hard whitelist.
-- If new evidence requires touching files outside phase.affected_files, you MAY expand scope.
-- When you expand or deviate from phase.affected_files, you MUST explain why in
-  `affected_files_delta_reason` in your final JSON.
+- Treat phase.affected_files as a planning hint, not a hard whitelist.
+- If new evidence requires touching files outside phase.affected_files, you MAY do so.
+- When you expand beyond the planned files, explain why in `affected_files_delta_reason`.
+- NOTE: The system automatically tracks every `write_file` / `apply_diff` call and will
+  use that record as the ground truth for `affected_files` and `files_changed`. Focus your
+  attention on producing an accurate `diff` and `explanation` — those cannot be inferred.
+
+## Retry behaviour
+- If the context contains a `previous_attempt_result` field with `success_criteria_met: false`,
+  this is a retry. Read the `explanation` field to understand what went wrong and correct it
+  before re-executing. Do not repeat the same approach that failed.
 
 ## Final response format
 When you are done with this phase, respond ONLY with a valid JSON object:
@@ -40,8 +47,8 @@ Fields:
 - files_changed: number of files you modified or created in this phase
 - explanation: concise description of what changed and why
 - language: primary programming language used
-- success_criteria_met: true if this phase's success_criteria (from current_phase.success_criteria) are satisfied, false otherwise
-- affected_files_delta_reason: REQUIRED when actual changed files differ from phase.affected_files;
+- success_criteria_met: true if this phase's success_criteria are satisfied, false otherwise
+- affected_files_delta_reason: explain here if you touched files outside phase.affected_files;
   use an empty string when there is no deviation
 
 Do not include any text outside the JSON object in your final response.";

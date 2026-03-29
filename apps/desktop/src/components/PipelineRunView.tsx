@@ -61,6 +61,16 @@ export type PipelineEventDto =
       complexity: string;
     }
   | { type: "stage_completed"; role: string; summary: string; success: boolean }
+  | {
+      type: "risk_assessed";
+      risk_level: "low" | "medium" | "high" | "unknown";
+      reason: string;
+      affected_areas: string[];
+      breaking_change: boolean;
+      security_implications: string;
+      cr_focus: string;
+      risk_unavailable: boolean;
+    }
   | { type: "pipeline_failed"; error: string }
   | { type: "drift_detected"; kind: string; reason: string }
   | { type: "network_error"; category: string; message: string; role: string };
@@ -214,6 +224,93 @@ const ROLE_ICON: Record<string, string> = {
   reviewer: "🔍",
 };
 
+// ── RiskCard ────────────────────────────────────────────────────────────────────────────────
+
+const RISK_CONFIG = {
+  high:    { color: "text-red-400",    border: "border-red-900/60",    bg: "bg-red-950/20",    icon: "🚨", badge: "destructive" as const },
+  medium:  { color: "text-yellow-400", border: "border-yellow-900/60", bg: "bg-yellow-950/20", icon: "⚠️",  badge: "warning"     as const },
+  low:     { color: "text-green-400",  border: "border-green-900/40",  bg: "bg-green-950/10",  icon: "✅",  badge: "success"     as const },
+  unknown: { color: "text-gray-400",   border: "border-gray-700",      bg: "bg-gray-900/60",   icon: "❓",  badge: "outline"     as const },
+};
+
+function RiskCard({
+  ev,
+}: {
+  ev: Extract<PipelineEventDto, { type: "risk_assessed" }>;
+}) {
+  if (ev.risk_unavailable) {
+    return (
+      <div className="mt-2 rounded-lg border border-yellow-900/60 bg-yellow-950/20 px-4 py-3">
+        <div className="flex items-center gap-2 text-xs text-yellow-400">
+          <span>⚠️</span>
+          <span>Risk assessment unavailable — review proceeded without risk data</span>
+        </div>
+      </div>
+    );
+  }
+
+  const cfg = RISK_CONFIG[ev.risk_level] ?? RISK_CONFIG.unknown;
+  return (
+    <div
+      className={`mt-2 rounded-lg border ${cfg.border} ${cfg.bg} px-4 py-3 space-y-2`}
+    >
+      {/* Header */}
+      <div className="flex items-center gap-2">
+        <span className="text-base leading-none">{cfg.icon}</span>
+        <span className={`text-sm font-semibold ${cfg.color}`}>
+          {ev.risk_level.toUpperCase()}
+        </span>
+        <Badge variant={cfg.badge} className="text-[10px] uppercase">
+          {ev.risk_level}
+        </Badge>
+      </div>
+
+      {/* Reason */}
+      <p className="text-xs text-gray-300 leading-relaxed">{ev.reason}</p>
+
+      {/* Affected areas */}
+      {ev.affected_areas.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {ev.affected_areas.map((area) => (
+            <span
+              key={area}
+              className="rounded border border-gray-700 px-1.5 py-0.5 text-[10px] text-gray-400"
+            >
+              {area}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Breaking change */}
+      {ev.breaking_change && (
+        <div className="flex items-center gap-1.5 text-xs text-red-400 font-medium">
+          <span>⚡</span>
+          <span>Breaking change</span>
+        </div>
+      )}
+
+      {/* Security implications */}
+      {ev.security_implications && (
+        <div className="text-xs text-orange-300">
+          <span className="font-medium">🔒 Security: </span>
+          {ev.security_implications}
+        </div>
+      )}
+
+      {/* Code review focus */}
+      {ev.cr_focus && (
+        <div className="rounded border border-gray-700 bg-gray-900/40 px-3 py-2">
+          <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
+            Review focus
+          </p>
+          <p className="text-xs text-gray-300">{ev.cr_focus}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── StageRow ─────────────────────────────────────────────────────────────────
 
 function StageRow({
@@ -285,6 +382,7 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
   } | null = null;
   let judgeReady: Extract<PipelineEventDto, { type: "judge_ready" }> | null = null;
   let scopeReady: Extract<PipelineEventDto, { type: "scope_ready" }> | null = null;
+  let riskAssessed: Extract<PipelineEventDto, { type: "risk_assessed" }> | null = null;
   // Collect network error warnings
   const networkErrors: { category: string; message: string; role: string }[] =
     [];
@@ -298,6 +396,8 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
       scopeReady = ev;
     } else if (ev.type === "plan_ready") {
       planReady = ev;
+    } else if (ev.type === "risk_assessed") {
+      riskAssessed = ev;
     } else if (ev.type === "stage_completed") {
       stageStatus[ev.role] = {
         status: ev.success ? "completed" : "failed",
@@ -456,6 +556,10 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
                   affectedFiles={planReady.affected_files}
                   complexity={planReady.complexity}
                 />
+              )}
+              {/* Show structured risk assessment under the risk row */}
+              {role === "risk" && riskAssessed && (
+                <RiskCard ev={riskAssessed} />
               )}
             </div>
           );

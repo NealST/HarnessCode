@@ -82,6 +82,9 @@ pub enum PipelineEvent {
         total_phases: usize,
         explanation: String,
         files_changed: usize,
+        /// Precise list of files written or patched during this phase, tracked
+        /// from tool calls rather than LLM self-report.
+        affected_files: Vec<String>,
     },
     /// A phase failed and is being retried (in-phase retry, not a full pipeline retry).
     PhaseRetrying {
@@ -98,6 +101,21 @@ pub enum PipelineEvent {
     },
     /// An agent stage completed successfully.
     StageCompleted { output: AgentOutput },
+    /// The Risk agent produced a structured assessment.
+    ///
+    /// Emitted immediately after [`StageCompleted`] for the Risk stage so that
+    /// consumers can display the full structured risk report without needing to
+    /// parse raw JSON from the payload.
+    RiskAssessed {
+        risk_level: String,
+        reason: String,
+        affected_areas: Vec<String>,
+        breaking_change: bool,
+        security_implications: String,
+        cr_focus: String,
+        /// `true` when risk assessment could not be completed (LLM error / non-JSON).
+        risk_unavailable: bool,
+    },
     /// The pipeline failed (agent error, guardrail, or max retries exceeded).
     PipelineFailed { error: String },
     /// An agent stage was intentionally skipped by the user.

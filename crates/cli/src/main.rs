@@ -919,6 +919,28 @@ async fn main() {
                                             pb.finish_with_message(format!("✅  {icon}  {label}   {}", output.summary));
                                         }
                                     }
+                                    PipelineEvent::RiskAssessed {
+                                        risk_level, reason, affected_areas,
+                                        breaking_change, security_implications, cr_focus, risk_unavailable,
+                                    } => {
+                                        if risk_unavailable {
+                                            println!("  ⚠️   Risk assessment unavailable\n");
+                                        } else {
+                                            let (colour, icon) = match risk_level.as_str() {
+                                                "high"   => ("\x1b[31m", "🚨"),
+                                                "medium" => ("\x1b[33m", "⚠️ "),
+                                                _        => ("\x1b[32m", "✅"),
+                                            };
+                                            println!("        {icon}  Level: {colour}{}  \x1b[0m{reason}", risk_level.to_uppercase());
+                                            if !affected_areas.is_empty() {
+                                                println!("        Affected: {}", affected_areas.join(" · "));
+                                            }
+                                            if breaking_change { println!("        \x1b[31m⚡ Breaking change\x1b[0m"); }
+                                            if !security_implications.is_empty() { println!("        🔒 Security: {security_implications}"); }
+                                            if !cr_focus.is_empty() { println!("        👁  CR Focus: {cr_focus}"); }
+                                            println!();
+                                        }
+                                    }
                                     PipelineEvent::PipelineFailed { error } => {
                                         if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
                                         eprintln!("  ❌  {error}");
@@ -1156,11 +1178,16 @@ async fn main() {
                     ));
                     current_pb = Some(pb);
                 }
-                PipelineEvent::PhaseCompleted { phase_id, title, total_phases, explanation, files_changed } => {
+                PipelineEvent::PhaseCompleted { phase_id, title, total_phases, explanation, files_changed, affected_files } => {
                     if let Some(pb) = current_pb.take() {
                         pb.finish_with_message(format!(
                             "✅  Phase {phase_id}/{total_phases}: {title}   {explanation}  \x1b[2m({files_changed} file(s) changed)\x1b[0m"
                         ));
+                    }
+                    if !affected_files.is_empty() {
+                        for f in &affected_files {
+                            println!("   \x1b[2m  · {f}\x1b[0m");
+                        }
                     }
                 }
                 PipelineEvent::PhaseRetrying { phase_id, title, reason, attempt } => {
@@ -1193,6 +1220,34 @@ async fn main() {
                     eprintln!(
                         "  ⚠️   {icon}  {label}   {cat_colour}[{category}]\x1b[0m {message}"
                     );
+                }
+                PipelineEvent::RiskAssessed {
+                    risk_level, reason, affected_areas,
+                    breaking_change, security_implications, cr_focus, risk_unavailable,
+                } => {
+                    if risk_unavailable {
+                        println!("  ⚠️   Risk assessment unavailable — proceeding without risk data\n");
+                    } else {
+                        let (colour, icon) = match risk_level.as_str() {
+                            "high"   => ("\x1b[31m", "🚨"),
+                            "medium" => ("\x1b[33m", "⚠️ "),
+                            _        => ("\x1b[32m", "✅"),
+                        };
+                        println!("        {icon}  Level: {colour}{}\x1b[0m  {reason}", risk_level.to_uppercase());
+                        if !affected_areas.is_empty() {
+                            println!("        Affected: {}", affected_areas.join(" · "));
+                        }
+                        if breaking_change {
+                            println!("        \x1b[31m⚡ Breaking change\x1b[0m");
+                        }
+                        if !security_implications.is_empty() {
+                            println!("        🔒 Security: {security_implications}");
+                        }
+                        if !cr_focus.is_empty() {
+                            println!("        👁  CR Focus: {cr_focus}");
+                        }
+                        println!();
+                    }
                 }
             }
         }

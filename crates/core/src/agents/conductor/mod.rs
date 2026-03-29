@@ -43,23 +43,56 @@ impl Agent for LlmConductorAgent {
             LlmMessage::user(context::user_message(plan_context)),
         ];
 
-        let (text, tokens) =
+        let (text, tokens, written_files) =
             run_tool_loop(&self.llm, messages, &self.registry, &self.guard, &self.obs, self.drift.as_ref()).await?;
-        let payload = parse_json_or_wrap(&text);
+        let mut payload = parse_json_or_wrap(&text);
+
+        // If the LLM returned free text instead of JSON, parse_json_or_wrap wraps
+        // it as {"raw": "..."}. Treat that as a failure rather than silently
+        // reporting success with an empty diff.
+        let non_json_response = payload.get("raw").is_some();
 
         // Consider the phase failed when the Conductor explicitly signals
         // success_criteria_met = false.  Missing key defaults to true (old
-        // model behaviour) so we don't break compability when the field is absent.
-        let success_criteria_met = payload
-            .get("success_criteria_met")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        // model behaviour) so we don't break compatibility when the field is absent.
+        let success_criteria_met = if non_json_response {
+            false
+        } else {
+            payload
+                .get("success_criteria_met")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+        };
 
-        let summary = payload
-            .get("explanation")
-            .and_then(|e| e.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "Code changes generated".to_string());
+        let summary = if non_json_response {
+            let preview: String = payload["raw"].as_str().unwrap_or("").chars().take(200).collect();
+            format!("Conductor returned non-JSON response: {preview}")
+        } else {
+            payload
+                .get("explanation")
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "Code changes generated".to_string())
+        };
+
+        // Inject ground-truth tracking data collected from tool calls.
+        // `affected_files` is the deduplicated sorted path list.
+        // `actual_changes` preserves full history (including multiple edits to the
+        // same file) so Risk can analyse the real content / diffs rather than the
+        // LLM-generated diff summary.
+        if !non_json_response {
+            let affected: Vec<String> = written_files
+                .iter()
+                .map(|wf| wf.path.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let files_changed = affected.len();
+            payload["affected_files"] = serde_json::json!(affected);
+            payload["files_changed"] = serde_json::json!(files_changed);
+            payload["actual_changes"] = serde_json::json!(written_files);
+        }
 
         Ok(AgentOutput {
             role: AgentRole::Conductor,
