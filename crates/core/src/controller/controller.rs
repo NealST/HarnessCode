@@ -1328,9 +1328,10 @@ impl Controller {
             let review_result = reviewer.execute(&context_for_reviewer).await;
             let review_tokens = review_result.as_ref().ok().and_then(|o| o.tokens);
             if let Some(t) = review_tokens { pipeline_tokens.add(t); }
+            // Reviewer always succeeds at producing a review (success = true always);
+            // the only failure path is an LLM/network error.
             let review_span_status = match &review_result {
-                Ok(o) if o.success => SpanStatus::Ok,
-                Ok(o) => SpanStatus::Retried { reason: o.summary.clone() },
+                Ok(_) => SpanStatus::Ok,
                 Err(e) => SpanStatus::Error { message: e.to_string() },
             };
             obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Reviewer, attempt }, review_span_status, review_tokens));
@@ -1350,6 +1351,27 @@ impl Controller {
                 Ok(o) => o,
             };
             send!(PipelineEvent::StageCompleted { output: review.clone() });
+            // Emit a structured event so consumers display the full review without
+            // needing to parse raw JSON from the StageCompleted payload.
+            {
+                let p = &review.payload;
+                let extract_strings = |key: &str| -> Vec<String> {
+                    p.get(key)
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                        .unwrap_or_default()
+                };
+                send!(PipelineEvent::ReviewCompleted {
+                    approved:          p.get("approved").and_then(|v| v.as_bool()).unwrap_or(false),
+                    criteria_met:      p.get("criteria_met").and_then(|v| v.as_bool()).unwrap_or(false),
+                    issues:            extract_strings("issues"),
+                    security_concerns: extract_strings("security_concerns"),
+                    recommendation:    p.get("recommendation")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(&review.summary)
+                                        .to_string(),
+                });
+            }
 
             info!(attempt, "Pipeline converged successfully");
             // Persist a conversation turn so history is available on the next request.

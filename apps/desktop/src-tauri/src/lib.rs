@@ -140,6 +140,14 @@ pub enum PipelineEventDto {
         cr_focus: String,
         risk_unavailable: bool,
     },
+    /// Full structured output from the Reviewer agent.
+    ReviewCompleted {
+        approved: bool,
+        criteria_met: bool,
+        issues: Vec<String>,
+        security_concerns: Vec<String>,
+        recommendation: String,
+    },
     PipelineFailed { error: String },
     /// An agent stage was intentionally skipped by the user.
     StageSkipped { role: String },
@@ -256,6 +264,11 @@ impl From<PipelineEvent> for PipelineEventDto {
             } => Self::RiskAssessed {
                 risk_level, reason, affected_areas, breaking_change,
                 security_implications, cr_focus, risk_unavailable,
+            },
+            PipelineEvent::ReviewCompleted {
+                approved, criteria_met, issues, security_concerns, recommendation,
+            } => Self::ReviewCompleted {
+                approved, criteria_met, issues, security_concerns, recommendation,
             },
             PipelineEvent::PipelineFailed { error } => Self::PipelineFailed { error },
             PipelineEvent::StageSkipped { role } => Self::StageSkipped {

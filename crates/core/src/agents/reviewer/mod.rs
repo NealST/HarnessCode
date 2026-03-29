@@ -5,7 +5,7 @@ pub mod context;
 use super::{parse_json_or_wrap, simple_complete, Agent, AgentError, AgentOutput, AgentRole};
 use crate::llm::LlmProvider;
 use crate::observability::TokenUsage;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tracing::info;
@@ -37,15 +37,17 @@ impl Agent for LlmReviewerAgent {
         .await?;
         let tokens = Some(TokenUsage::from(&response));
         let mut payload = parse_json_or_wrap(&response.content);
-        let consistency_issue = detect_unexplained_file_scope_drift(review_context);
 
-        if let Some(issue) = consistency_issue.as_ref() {
-            enforce_rejection_with_issue(&mut payload, issue);
+        // Rust-side drift check: if the Coder touched files not in the plan, append
+        // a note to `issues` so the user is aware. This is advisory — it does not
+        // override the LLM's verdict or force a pipeline retry.
+        if let Some(issue) = detect_unexplained_file_scope_drift(review_context) {
+            append_drift_issue(&mut payload, &issue);
         }
 
-        // Fail-safe defaults: if the LLM returns malformed JSON without these
-        // keys, we conservatively treat the review as rejected so the pipeline
-        // retries rather than silently approving broken output.
+        // Read the LLM's advisory verdict for display purposes.
+        // Defaults to false if missing (malformed JSON) — conservative but only
+        // affects what the user sees, not whether the pipeline continues.
         let approved = payload
             .get("approved")
             .and_then(|v| v.as_bool())
@@ -54,23 +56,24 @@ impl Agent for LlmReviewerAgent {
             .get("criteria_met")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let passed = approved && criteria_met;
         let recommendation = payload
             .get("recommendation")
             .and_then(|r| r.as_str())
-            .unwrap_or(if passed {
-                "Approved"
+            .unwrap_or(if approved && criteria_met {
+                "Review complete — no issues found"
             } else if !criteria_met {
-                "Rejected — success criteria not met"
+                "Review complete — success criteria not fully met"
             } else {
-                "Rejected — revisions required"
+                "Review complete — issues identified, see details"
             });
 
+        // The reviewer always succeeds at producing a review. Whether the changes
+        // are accepted is a decision for the user, not the pipeline.
         Ok(AgentOutput {
             role: AgentRole::Reviewer,
             summary: recommendation.to_string(),
             payload,
-            success: passed,
+            success: true,
             tokens,
         })
     }
@@ -81,123 +84,106 @@ fn detect_unexplained_file_scope_drift(review_context: &str) -> Option<String> {
     let plan = parsed.get("plan")?;
     let code_changes = parsed.get("code_changes")?;
 
-    // Handle both old flat format (`plan.affected_files`) and new phased format
-    // (`plan.phases[*].affected_files`).  Aggregate all phase-level candidate files
-    // into a single set so the drift check works regardless of plan shape.
+    // Aggregate planned files from both flat (`plan.affected_files`) and phased
+    // (`plan.phases[*].affected_files`) formats.
     let planned: BTreeSet<String> = {
         let flat = value_array_strings(plan, "affected_files");
         if !flat.is_empty() {
-            flat.into_iter().collect()
-        } else if let Some(phases) = plan.get("phases").and_then(|p| p.as_array()) {
-            phases
-                .iter()
-                .flat_map(|ph| value_array_strings(ph, "affected_files"))
-                .collect()
+            flat
         } else {
-            BTreeSet::new()
+            plan.get("phases")
+                .and_then(|p| p.as_array())
+                .map(|phases| {
+                    phases
+                        .iter()
+                        .flat_map(|ph| value_array_strings(ph, "affected_files"))
+                        .collect()
+                })
+                .unwrap_or_default()
         }
     };
+
+    // Primary source: actual_changes[].path (ground-truth from conductor).
+    // Fallback 1: affected_files list injected by conductor.
+    // Fallback 2: classic unified-diff header parsing.
     let actual: BTreeSet<String> = extract_changed_files_from_code_changes(code_changes);
 
     if planned.is_empty() || actual.is_empty() {
         return None;
     }
 
+    // Only flag extras (files touched outside the plan). Missing files are not a
+    // problem — the Coder may have found a more targeted approach than the plan predicted.
     let extras: Vec<String> = actual.difference(&planned).cloned().collect();
-    let missing: Vec<String> = planned.difference(&actual).cloned().collect();
 
-    if extras.is_empty() && missing.is_empty() {
+    if extras.is_empty() {
         return None;
     }
-
-    let delta_reason = code_changes
-        .get("affected_files_delta_reason")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .unwrap_or("");
-    if !delta_reason.is_empty() {
-        return None;
-    }
-
-    let extras_text = if extras.is_empty() {
-        "none".to_string()
-    } else {
-        extras.join(", ")
-    };
-    let missing_text = if missing.is_empty() {
-        "none".to_string()
-    } else {
-        missing.join(", ")
-    };
 
     Some(format!(
-        "Changed files drifted from plan.affected_files without explanation (affected_files_delta_reason is empty). extras: [{extras_text}]; missing: [{missing_text}]"
+        "Coder modified files not listed in plan.affected_files: [{}]. \
+         Verify these changes are intentional.",
+        extras.join(", ")
     ))
 }
 
 fn extract_changed_files_from_code_changes(code_changes: &Value) -> BTreeSet<String> {
-    let mut files = BTreeSet::new();
-
-    if let Some(diff) = code_changes.get("diff").and_then(|v| v.as_str()) {
-        for line in diff.lines() {
-            if let Some(path) = line.strip_prefix("+++ b/") {
-                if path != "/dev/null" {
-                    files.insert(path.to_string());
-                }
-            } else if let Some(path) = line.strip_prefix("--- a/") {
-                if path != "/dev/null" {
-                    files.insert(path.to_string());
-                }
-            }
+    // Priority 1: actual_changes[].path — ground-truth written by conductor.
+    if let Some(actual_changes) = code_changes.get("actual_changes").and_then(|v| v.as_array()) {
+        let paths: BTreeSet<String> = actual_changes
+            .iter()
+            .filter_map(|entry| entry.get("path").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        if !paths.is_empty() {
+            return paths;
         }
     }
 
-    files
-}
+    // Priority 2: affected_files — deduped list injected by conductor.
+    let affected = value_array_strings(code_changes, "affected_files");
+    if !affected.is_empty() {
+        return affected;
+    }
 
-fn value_array_strings(value: &Value, key: &str) -> Vec<String> {
-    value
-        .get(key)
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
+    // Priority 3: unified-diff header parsing (legacy / fallback).
+    code_changes
+        .get("diff")
+        .and_then(|v| v.as_str())
+        .map(|diff| {
+            diff.lines()
+                .filter_map(|line| {
+                    line.strip_prefix("+++ b/")
+                        .or_else(|| line.strip_prefix("--- a/"))
+                        .filter(|&p| p != "/dev/null")
+                        .map(str::to_string)
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn enforce_rejection_with_issue(payload: &mut Value, issue: &str) {
+fn value_array_strings(value: &Value, key: &str) -> BTreeSet<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// Append a drift note to the `issues` array in the LLM payload.
+/// Does not modify `approved`, `criteria_met`, or `recommendation` —
+/// those reflect the LLM's assessment and are advisory for the user.
+fn append_drift_issue(payload: &mut Value, issue: &str) {
     if !payload.is_object() {
-        *payload = json!({
-            "approved": false,
-            "criteria_met": false,
-            "issues": [issue],
-            "security_concerns": [],
-            "recommendation": "Rejected — changed file set drifted from plan without explanation",
-        });
-        return;
+        return; // Non-JSON response; leave as-is.
     }
-
     if let Some(obj) = payload.as_object_mut() {
-        obj.insert("approved".to_string(), Value::Bool(false));
-        obj.insert("criteria_met".to_string(), Value::Bool(false));
-
         let issues_value = obj
             .entry("issues".to_string())
             .or_insert_with(|| Value::Array(vec![]));
         match issues_value {
             Value::Array(arr) => arr.push(Value::String(issue.to_string())),
-            _ => {
-                *issues_value = Value::Array(vec![Value::String(issue.to_string())]);
-            }
+            _ => *issues_value = Value::Array(vec![Value::String(issue.to_string())]),
         }
-
-        obj.entry("security_concerns".to_string())
-            .or_insert_with(|| Value::Array(vec![]));
-        obj.insert(
-            "recommendation".to_string(),
-            Value::String("Rejected — changed file set drifted from plan without explanation".to_string()),
-        );
     }
 }

@@ -56,11 +56,13 @@ export type PipelineEventDto =
     }
   | {
       type: "plan_ready";
-      steps: string[];
-      affected_files: string[];
+      phase_count: number;
+      phases: { phase_id: number; title: string; step_count: number; complexity: string }[];
       complexity: string;
     }
   | { type: "stage_completed"; role: string; summary: string; success: boolean }
+  | { type: "stage_skipped"; role: string }
+  | { type: "stage_retrying"; role: string; reason: string; attempt: number }
   | {
       type: "risk_assessed";
       risk_level: "low" | "medium" | "high" | "unknown";
@@ -70,6 +72,14 @@ export type PipelineEventDto =
       security_implications: string;
       cr_focus: string;
       risk_unavailable: boolean;
+    }
+  | {
+      type: "review_completed";
+      approved: boolean;
+      criteria_met: boolean;
+      issues: string[];
+      security_concerns: string[];
+      recommendation: string;
     }
   | { type: "pipeline_failed"; error: string }
   | { type: "drift_detected"; kind: string; reason: string }
@@ -96,12 +106,10 @@ const COMPLEXITY_COLOR: Record<string, string> = {
 };
 
 function PlanTodoList({
-  steps,
-  affectedFiles,
+  phases,
   complexity,
 }: {
-  steps: string[];
-  affectedFiles: string[];
+  phases: { phase_id: number; title: string; step_count: number; complexity: string }[];
   complexity: string;
 }) {
   const colorClass = COMPLEXITY_COLOR[complexity] ?? "text-gray-400";
@@ -115,34 +123,19 @@ function PlanTodoList({
         </span>
       </div>
       <ol className="space-y-1">
-        {steps.map((step, i) => (
-          <li key={i} className="flex items-start gap-2 text-xs text-gray-300">
+        {phases.map((phase) => (
+          <li key={phase.phase_id} className="flex items-start gap-2 text-xs text-gray-300">
             <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border border-gray-600 text-[10px] text-gray-500">
-              {i + 1}
+              {phase.phase_id}
             </span>
-            <span>{step}</span>
+            <span className="flex-1">{phase.title}</span>
+            <span className="text-gray-500">{phase.step_count} step{phase.step_count !== 1 ? "s" : ""}</span>
           </li>
         ))}
       </ol>
-      {affectedFiles.length > 0 && (
-        <div className="pt-1 border-t border-gray-700">
-          <p className="text-[10px] text-gray-500 mb-1">Files</p>
-          <ul className="space-y-0.5">
-            {affectedFiles.map((f) => (
-              <li
-                key={f}
-                className="text-[11px] font-mono text-brand-400 truncate"
-              >
-                • {f}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }
-
 function ScopeCard({
   scope,
 }: {
@@ -311,6 +304,84 @@ function RiskCard({
   );
 }
 
+// ── ReviewCard ───────────────────────────────────────────────────────────────
+
+function ReviewCard({
+  ev,
+}: {
+  ev: Extract<PipelineEventDto, { type: "review_completed" }>;
+}) {
+  const hasIssues = ev.issues.length > 0;
+  const hasSecurity = ev.security_concerns.length > 0;
+  const borderColor = ev.approved
+    ? hasIssues
+      ? "border-yellow-900/60"
+      : "border-green-900/40"
+    : "border-red-900/60";
+  const bgColor = ev.approved
+    ? hasIssues
+      ? "bg-yellow-950/20"
+      : "bg-green-950/10"
+    : "bg-red-950/20";
+  const icon = ev.approved ? (hasIssues ? "⚠️" : "✅") : "❌";
+  const labelColor = ev.approved
+    ? hasIssues
+      ? "text-yellow-400"
+      : "text-green-400"
+    : "text-red-400";
+  const label = ev.approved ? "APPROVED" : "CONCERNS FOUND";
+
+  return (
+    <div className={`mt-2 rounded-lg border ${borderColor} ${bgColor} px-4 py-3 space-y-2`}>
+      {/* Header */}
+      <div className="flex items-center gap-2">
+        <span className="text-base leading-none">{icon}</span>
+        <span className={`text-sm font-semibold ${labelColor}`}>{label}</span>
+        <span
+          className={`rounded border px-1.5 py-0.5 text-[10px] uppercase ${
+            ev.criteria_met
+              ? "border-green-800 text-green-400"
+              : "border-red-800 text-red-400"
+          }`}
+        >
+          criteria {ev.criteria_met ? "met" : "not met"}
+        </span>
+      </div>
+
+      {/* Recommendation */}
+      <p className="text-xs text-gray-200 leading-relaxed">{ev.recommendation}</p>
+
+      {/* Issues */}
+      {hasIssues && (
+        <div className="rounded border border-yellow-900/40 bg-yellow-950/10 px-3 py-2 space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-yellow-500">Issues</p>
+          <ul className="space-y-1">
+            {ev.issues.map((issue, i) => (
+              <li key={i} className="text-xs text-yellow-100">
+                • {issue}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Security concerns */}
+      {hasSecurity && (
+        <div className="rounded border border-red-900/50 bg-red-950/20 px-3 py-2 space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-red-400">Security</p>
+          <ul className="space-y-1">
+            {ev.security_concerns.map((concern, i) => (
+              <li key={i} className="text-xs text-red-200">
+                🔒 {concern}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── StageRow ─────────────────────────────────────────────────────────────────
 
 function StageRow({
@@ -319,7 +390,7 @@ function StageRow({
   summary,
 }: {
   role: string;
-  status: "waiting" | "running" | "completed" | "failed";
+  status: "waiting" | "running" | "completed" | "failed" | "skipped" | "advisory";
   summary?: string;
 }) {
   return (
@@ -341,6 +412,16 @@ function StageRow({
           {status === "failed" && (
             <Badge variant="destructive" className="text-xs">
               failed
+            </Badge>
+          )}
+          {status === "skipped" && (
+            <Badge variant="outline" className="text-xs text-gray-500">
+              skipped
+            </Badge>
+          )}
+          {status === "advisory" && (
+            <Badge variant="outline" className="text-xs text-yellow-400 border-yellow-700">
+              reviewed
             </Badge>
           )}
           {status === "waiting" && (
@@ -371,18 +452,15 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
   // Derive per-stage status from the event stream
   const stageStatus: Record<
     string,
-    { status: "waiting" | "running" | "completed" | "failed"; summary?: string }
+    { status: "waiting" | "running" | "completed" | "failed" | "skipped" | "advisory"; summary?: string }
   > = Object.fromEntries(STAGE_ORDER.map((r) => [r, { status: "waiting" }]));
 
   // Extract plan todo-list from a plan_ready event (if present)
-  let planReady: {
-    steps: string[];
-    affected_files: string[];
-    complexity: string;
-  } | null = null;
+  let planReady: Extract<PipelineEventDto, { type: "plan_ready" }> | null = null;
   let judgeReady: Extract<PipelineEventDto, { type: "judge_ready" }> | null = null;
   let scopeReady: Extract<PipelineEventDto, { type: "scope_ready" }> | null = null;
   let riskAssessed: Extract<PipelineEventDto, { type: "risk_assessed" }> | null = null;
+  let reviewCompleted: Extract<PipelineEventDto, { type: "review_completed" }> | null = null;
   // Collect network error warnings
   const networkErrors: { category: string; message: string; role: string }[] =
     [];
@@ -398,6 +476,13 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
       planReady = ev;
     } else if (ev.type === "risk_assessed") {
       riskAssessed = ev;
+    } else if (ev.type === "review_completed") {
+      reviewCompleted = ev;
+      stageStatus["reviewer"] = { status: "advisory", summary: ev.recommendation };
+    } else if (ev.type === "stage_skipped") {
+      stageStatus[ev.role] = { status: "skipped" };
+    } else if (ev.type === "stage_retrying") {
+      stageStatus[ev.role] = { status: "running", summary: `Retrying (attempt ${ev.attempt}): ${ev.reason}` };
     } else if (ev.type === "stage_completed") {
       stageStatus[ev.role] = {
         status: ev.success ? "completed" : "failed",
@@ -552,14 +637,17 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
               {/* Show execution plan as a todo list under the planner row */}
               {role === "planner" && planReady && (
                 <PlanTodoList
-                  steps={planReady.steps}
-                  affectedFiles={planReady.affected_files}
+                  phases={planReady.phases}
                   complexity={planReady.complexity}
                 />
               )}
               {/* Show structured risk assessment under the risk row */}
               {role === "risk" && riskAssessed && (
                 <RiskCard ev={riskAssessed} />
+              )}
+              {/* Show structured review under the reviewer row */}
+              {role === "reviewer" && reviewCompleted && (
+                <ReviewCard ev={reviewCompleted} />
               )}
             </div>
           );

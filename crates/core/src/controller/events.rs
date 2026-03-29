@@ -116,6 +116,22 @@ pub enum PipelineEvent {
         /// `true` when risk assessment could not be completed (LLM error / non-JSON).
         risk_unavailable: bool,
     },
+    /// The Reviewer agent produced its structured assessment.
+    ///
+    /// Emitted immediately after [`StageCompleted`] for the Reviewer stage so that
+    /// consumers can display the full review report without parsing raw JSON.
+    ReviewCompleted {
+        /// Reviewer's advisory verdict — `true` if no significant issues were found.
+        approved: bool,
+        /// Whether the `success_criteria` from the plan are fully satisfied.
+        criteria_met: bool,
+        /// Functional, quality, or completeness problems identified.
+        issues: Vec<String>,
+        /// Security-specific concerns (injection, data leaks, etc.).
+        security_concerns: Vec<String>,
+        /// One-sentence summary of the verdict with key points for the user.
+        recommendation: String,
+    },
     /// The pipeline failed (agent error, guardrail, or max retries exceeded).
     PipelineFailed { error: String },
     /// An agent stage was intentionally skipped by the user.
