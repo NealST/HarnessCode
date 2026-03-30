@@ -16,7 +16,7 @@ use super::request_context::RequestContext;
 use crate::commands::BuiltinAgentKind;
 use crate::agents::{
     compactor::CompactorAgent,
-    drift_judge::{DriftCallback, DriftConfig, DriftJudgeAgent, DriftParams},
+    drift_judge::{DriftCallback, DriftConfig, DriftDecision, DriftJudgeAgent, DriftNotifyFn, DriftParams},
     Agent, AgentError, AgentOutput, AgentRole, JudgeAgent, LlmConductorAgent, LlmPlannerAgent,
     LlmReviewerAgent, LlmRiskAgent, LlmScoperAgent,
 };
@@ -309,6 +309,9 @@ impl Controller {
 
         // Track whether we already used our one timeout-retry.
         let mut attempt = 0usize;
+        // LOGIC-9 fix: drift restarts have their own counter (reset here,
+        // not inside the loop) so they don't consume normal retry slots.
+        let mut drift_restart_count = 0usize;
         let result: Result<Vec<AgentOutput>, AgentError>;
 
         // The effective prompt may be reinforced on a drift-triggered restart.
@@ -966,16 +969,47 @@ impl Controller {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
-                // Drift prompt includes the current phase objective so the judge
-                // has enough context to distinguish legitimate phase work from
-                // true scope drift.
+                // Build the judge prompt with the current phase objective and scope
+                // boundaries so the judge can distinguish legitimate phase work from
+                // true drift (DESIGN-1 fix).
                 let phase_objective = phase
                     .get("objective")
                     .and_then(|v| v.as_str())
                     .unwrap_or(phase_title.as_str());
-                let drift_prompt = format!(
-                    "{original_prompt}\n\nCurrent phase objective: {phase_objective}"
-                );
+                // Scope boundaries extracted from the Scoper's output.
+                let in_scope_items: Vec<&str> = scoped.payload
+                    .get("in_scope")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                let out_of_scope_items: Vec<&str> = scoped.payload
+                    .get("out_of_scope")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                let relevant_files_items: Vec<&str> = scoped.payload
+                    .get("relevant_files")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                // BUG-1 fix: `judge_prompt` is phase-scoped (includes objective +
+                // scope boundaries) and used ONLY for the judge LLM call.
+                // `original_prompt` stays clean for drift-reinforced restarts.
+                let judge_prompt = {
+                    let mut s = format!(
+                        "{original_prompt}\n\nCurrent phase objective: {phase_objective}"
+                    );
+                    if !in_scope_items.is_empty() {
+                        s.push_str(&format!("\nIn scope: {}", in_scope_items.join(", ")));
+                    }
+                    if !out_of_scope_items.is_empty() {
+                        s.push_str(&format!("\nOut of scope: {}", out_of_scope_items.join(", ")));
+                    }
+                    if !relevant_files_items.is_empty() {
+                        s.push_str(&format!("\nExpected affected files: {}", relevant_files_items.join(", ")));
+                    }
+                    s
+                };
 
                 let phase_context = serde_json::json!({
                     "effective_request": effective_prompt,
@@ -987,17 +1021,49 @@ impl Controller {
                 })
                 .to_string();
 
+                // LOGIC-1 fix: when a judge is attached but no drift_callback was
+                // supplied (e.g. CLI / tests), default to an Ignore-everything callback
+                // so drift detection still runs and logs, rather than being silently
+                // disabled by the .zip() returning None.
+                let effective_drift_callback: Option<DriftCallback> = if self.drift_judge.is_some() {
+                    Some(drift_callback.as_ref().cloned().unwrap_or_else(|| {
+                        Arc::new(|_signal| Box::pin(async { DriftDecision::Ignore }))
+                    }))
+                } else {
+                    None
+                };
+
+                // LOGIC-3 / MISSING-1: build a synchronous notify hook that fires a
+                // DriftDetected event on the pipeline channel before the async callback
+                // is awaited, so the UI can render a warning immediately.
+                let drift_notify: Option<DriftNotifyFn> =
+                    effective_drift_callback.as_ref().and_then(|_| {
+                        tx.as_ref().map(|sender| {
+                            let sender = sender.clone();
+                            Arc::new(move |kind: &crate::agents::drift_judge::DriftKind, reason: &str| {
+                                let tx = sender.clone();
+                                let event = PipelineEvent::DriftDetected {
+                                    kind: kind.to_string(),
+                                    reason: reason.to_string(),
+                                };
+                                tokio::spawn(async move { let _ = tx.send(event).await; });
+                            }) as DriftNotifyFn
+                        })
+                    });
+
                 // Each phase gets its own fresh guard and ObsCtx child span.
                 let make_conductor = || {
                     let g   = Arc::new(self.guard_template.build());
                     let obs = obs.child(pipeline_span_id);
                     let drift = self.drift_judge.as_ref()
-                        .zip(drift_callback.as_ref())
+                        .zip(effective_drift_callback.as_ref())
                         .map(|(judge, callback)| DriftParams {
                             judge: Arc::clone(judge),
                             config: self.drift_config.clone(),
-                            original_prompt: drift_prompt.clone(),
+                            original_prompt: original_prompt.clone(),
+                            judge_prompt: judge_prompt.clone(),
                             callback: Arc::clone(callback),
+                            notify: drift_notify.clone(),
                         });
                     LlmConductorAgent {
                         llm:      Arc::clone(&self.llm),
@@ -1167,18 +1233,25 @@ impl Controller {
                 if drift_occurred {
                     if let Some(reinforced_prompt) = drift_reinforced_prompt {
                         effective_prompt = reinforced_prompt;
-                        if attempt >= self.max_retries {
+                        // LOGIC-9 fix: drift restarts have their own budget
+                        // (max_drift_restarts) so they don't consume the normal
+                        // phase-failure retry slots.
+                        drift_restart_count += 1;
+                        if drift_restart_count > self.drift_config.max_drift_restarts {
                             send!(PipelineEvent::PipelineFailed {
-                                error: "Drift restart attempted but retry limit reached".into()
+                                error: format!(
+                                    "Drift restart limit ({}) exceeded",
+                                    self.drift_config.max_drift_restarts
+                                ),
                             });
-                            result = Err(AgentError::MaxRetriesExceeded(self.max_retries));
+                            result = Err(AgentError::MaxRetriesExceeded(
+                                self.drift_config.max_drift_restarts,
+                            ));
                             break;
                         }
-                        // BUG-2 fix: PipelineRetrying (not PipelineFailed) — the pipeline
-                        // continues! PipelineFailed is semantically terminal.
                         send!(PipelineEvent::PipelineRetrying {
                             reason: "Drift detected — restarting with reinforced prompt".into(),
-                            attempt: attempt + 1,
+                            attempt: drift_restart_count,
                         });
                         continue;
                     }

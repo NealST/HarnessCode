@@ -157,6 +157,15 @@ pub enum PipelineEvent {
     /// `attempt` is the attempt that just failed (1-based), `reason` is the
     /// agent's own failure summary.
     StageRetrying { role: AgentRole, reason: String, attempt: usize },
+    /// Drift detected in the tool loop — emitted synchronously before the
+    /// async `DriftCallback` is awaited, so the UI can show a warning
+    /// immediately without waiting for the user decision round-trip.
+    DriftDetected {
+        /// Classification: `"scope"`, `"direction"`, or `"both"`.
+        kind: String,
+        /// Human-readable explanation from the drift judge.
+        reason: String,
+    },
     /// A network or API error occurred during an LLM request.
     ///
     /// Informational — the controller may retry the stage.  Consumers should

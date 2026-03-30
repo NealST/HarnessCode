@@ -289,6 +289,7 @@ impl From<PipelineEvent> for PipelineEventDto {
                 reason,
                 attempt,
             },
+            PipelineEvent::DriftDetected { kind, reason } => Self::DriftDetected { kind, reason },
             PipelineEvent::NetworkError { category, message, role } =>
                 Self::NetworkError { category, message, role: role.to_string().to_lowercase() },
         }

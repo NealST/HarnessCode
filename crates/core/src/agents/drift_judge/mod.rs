@@ -20,15 +20,38 @@ use std::sync::Arc;
 /// Controls when and how the drift judge is triggered inside the tool loop.
 #[derive(Debug, Clone)]
 pub struct DriftConfig {
-    /// Number of tool-use turns between drift checks (default: 5, user-configurable).
+    /// Number of tool-use turns between drift checks (must be ≥ 1, default: 5).
     pub check_interval: usize,
-    /// Number of most-recent turns sent to the judge as context (default: 5).
+    /// Number of most-recent turns sent to the judge as context (must be ≥ 1, default: 5).
     pub window_size: usize,
+    /// Maximum number of drift-triggered restarts before the pipeline gives up
+    /// (independent of the normal phase-failure retry budget, default: 3).
+    pub max_drift_restarts: usize,
 }
 
 impl Default for DriftConfig {
     fn default() -> Self {
-        Self { check_interval: 5, window_size: 5 }
+        Self { check_interval: 5, window_size: 5, max_drift_restarts: 3 }
+    }
+}
+
+impl DriftConfig {
+    /// Create a validated `DriftConfig`.
+    ///
+    /// Returns `Err` when `check_interval` or `window_size` is 0 (which would
+    /// cause a division-by-zero panic or a useless LLM call).
+    pub fn new(
+        check_interval: usize,
+        window_size: usize,
+        max_drift_restarts: usize,
+    ) -> Result<Self, &'static str> {
+        if check_interval == 0 {
+            return Err("DriftConfig: check_interval must be ≥ 1");
+        }
+        if window_size == 0 {
+            return Err("DriftConfig: window_size must be ≥ 1");
+        }
+        Ok(Self { check_interval, window_size, max_drift_restarts })
     }
 }
 
@@ -107,6 +130,14 @@ pub type DriftCallback = Arc<
         + Sync,
 >;
 
+/// Synchronous notification hook called immediately *before* invoking the
+/// async `DriftCallback`.  Receives the drift `kind` and `reason` strings.
+///
+/// Intended for emitting a `PipelineEvent::DriftDetected` (or similar) to
+/// a UI channel.  The controller builds this closure capturing the mpsc
+/// sender so that `agents::drift_judge` remains free of controller deps.
+pub type DriftNotifyFn = Arc<dyn Fn(&DriftKind, &str) + Send + Sync>;
+
 // ──────────────────────────────────────────────
 // Bundled params (passed into run_tool_loop)
 // ──────────────────────────────────────────────
@@ -116,9 +147,17 @@ pub type DriftCallback = Arc<
 pub struct DriftParams {
     pub judge: Arc<DriftJudgeAgent>,
     pub config: DriftConfig,
-    /// Copy of the original user prompt embedded in reinforcement messages.
+    /// Clean original user prompt — embedded verbatim in drift-reinforced restart
+    /// messages so the re-attempt always targets the unmodified user intent.
     pub original_prompt: String,
+    /// Phase-scoped prompt sent to the judge LLM.  Extends `original_prompt`
+    /// with the current phase objective and scope boundaries so the judge can
+    /// tell legitimate phase work from true drift.
+    pub judge_prompt: String,
     pub callback: DriftCallback,
+    /// Optional synchronous hook fired *before* `callback`; use it to emit
+    /// a `PipelineEvent::DriftDetected` without creating a circular dep.
+    pub notify: Option<DriftNotifyFn>,
 }
 
 // ──────────────────────────────────────────────
@@ -168,14 +207,18 @@ fn parse_drift_signal(text: &str) -> Result<DriftSignal, AgentError> {
     let json_str = extract_json(text);
     let v: serde_json::Value = serde_json::from_str(json_str)?;
 
-    if v["aligned"].as_bool().unwrap_or(true) {
+    // BUG-4 fix: absent `aligned` key must default to `false`, not `true`.
+    // Defaulting to `true` would silently treat malformed responses as Aligned.
+    if v["aligned"].as_bool().unwrap_or(false) {
         return Ok(DriftSignal::Aligned);
     }
 
-    let kind = match v["kind"].as_str().unwrap_or("scope") {
+    // BUG-5 fix: when `kind` is absent default to `Both` (most conservative)
+    // rather than `Scope`, to avoid misclassifying an unknown signal.
+    let kind = match v["kind"].as_str().unwrap_or("both") {
+        "scope"     => DriftKind::Scope,
         "direction" => DriftKind::Direction,
-        "both"      => DriftKind::Both,
-        _           => DriftKind::Scope,
+        _           => DriftKind::Both,
     };
 
     let reason = v["reason"]
@@ -186,14 +229,38 @@ fn parse_drift_signal(text: &str) -> Result<DriftSignal, AgentError> {
     Ok(DriftSignal::Drifted { kind, reason })
 }
 
-/// Strip optional markdown fences and return a slice pointing at the first
-/// `{…}` JSON object in the text.
+/// Extract the first complete `{…}` JSON object from `text` using a
+/// bracket-depth counter.
+///
+/// Unlike `rfind('}')`, this correctly handles `}` characters that appear
+/// *inside* string values (e.g. in the `reason` field).
 fn extract_json(text: &str) -> &str {
     let t = text.trim();
-    match (t.find('{'), t.rfind('}')) {
-        (Some(start), Some(end)) if end >= start => &t[start..=end],
-        _ => t,
+    let Some(start) = t.find('{') else { return t };
+    let bytes = t.as_bytes();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape_next = false;
+    for (i, &b) in bytes[start..].iter().enumerate() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        match b {
+            b'\\' if in_string => escape_next = true,
+            b'"'               => in_string = !in_string,
+            b'{' if !in_string => depth += 1,
+            b'}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return &t[start..=start + i];
+                }
+            }
+            _ => {}
+        }
     }
+    // No balanced closing brace — return everything from the opening brace.
+    &t[start..]
 }
 
 // ──────────────────────────────────────────────

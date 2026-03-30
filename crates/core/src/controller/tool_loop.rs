@@ -223,11 +223,16 @@ pub async fn run_tool_loop(
 
                 // ── Drift detection ───────────────────────────────────────
                 if let Some(dp) = drift {
-                    // Record a lightweight summary of this turn.
-                    let args_json = serde_json::to_string(&calls)
-                        .unwrap_or_default();
-                    // Single-pass truncation: take(500) stops at the char boundary,
-                    // then compare lengths to know whether we actually truncated.
+                    // LOGIC-4 fix: serialize only (tool_name, arguments) pairs for
+                    // the snippet — previously the full ToolCall struct was serialised,
+                    // which included internal fields irrelevant to the judge.
+                    let args_json = serde_json::to_string(
+                        &calls.iter()
+                            .map(|c| serde_json::json!({ "tool": c.name, "args": c.arguments }))
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap_or_default();
+                    // Single-pass truncation to ≤500 chars.
                     let truncated: String = args_json.chars().take(500).collect();
                     let snippet = if truncated.len() < args_json.len() {
                         format!("{truncated}…")
@@ -240,32 +245,62 @@ pub async fn run_tool_loop(
                         call_args_snippet: snippet,
                     });
 
-                    // Only check every `check_interval` turns.
-                    if turn % dp.config.check_interval == 0 {
+                    // BUG-2 fix: guard against check_interval == 0 (division-by-zero).
+                    // LOGIC-5 fix: skip the judge call when window_size == 0 (nothing
+                    // to evaluate).
+                    let should_check = dp.config.check_interval > 0
+                        && dp.config.window_size > 0
+                        && turn % dp.config.check_interval == 0;
+
+                    if should_check {
                         let window_start = turn_summaries
                             .len()
                             .saturating_sub(dp.config.window_size);
                         let window = &turn_summaries[window_start..];
 
-                        match dp.judge.judge(&dp.original_prompt, window).await {
+                        // DESIGN-3: wrap the judge LLM call in an observability span.
+                        let judge_timer = obs.start_span();
+                        // BUG-1 fix: use `judge_prompt` (phase-scoped) for the LLM call,
+                        // keep `original_prompt` clean for use in the reinforced restart.
+                        let judge_result = dp.judge.judge(&dp.judge_prompt, window).await;
+                        let judge_status = match &judge_result {
+                            Ok(_)  => SpanStatus::Ok,
+                            Err(e) => SpanStatus::Error { message: e.to_string() },
+                        };
+                        obs.record(judge_timer.finish(
+                            obs.run_id,
+                            obs.current_span_id,
+                            SpanKind::LlmRequest { turn, category: "drift_judge".into() },
+                            judge_status,
+                            None,
+                        ));
+
+                        match judge_result {
                             Ok(DriftSignal::Aligned) => {
                                 // On track — continue normally.
                             }
                             Ok(signal @ DriftSignal::Drifted { .. }) => {
-                                warn!(
-                                    turn,
-                                    "Drift detected — invoking callback for user decision"
-                                );
-                                let reason = match &signal {
-                                    DriftSignal::Drifted { reason, .. } => reason.clone(),
+                                warn!(turn, "Drift detected — invoking callback for user decision");
+                                let (kind, reason) = match &signal {
+                                    DriftSignal::Drifted { kind, reason } => (kind.clone(), reason.clone()),
                                     DriftSignal::Aligned => unreachable!(),
                                 };
+                                // LOGIC-3 / MISSING-1: fire the synchronous notify hook
+                                // *before* blocking on the async callback so the UI can
+                                // immediately show a DriftDetected indicator.
+                                if let Some(ref notify) = dp.notify {
+                                    notify(&kind, &reason);
+                                }
                                 let decision = (dp.callback)(signal).await;
                                 match decision {
                                     DriftDecision::Stop => {
                                         return Err(AgentError::DriftAborted);
                                     }
                                     DriftDecision::Restart => {
+                                        // BUG-1 fix: use the clean `original_prompt` (not
+                                        // the phase-scoped `judge_prompt`) so the reinforced
+                                        // restart reflects the true user intent, not a
+                                        // phase-specific objective.
                                         let reinforced = format!(
                                             "Original goal: {original}\n\nDrift detected during execution: {reason}\n\n\
 Keep all actions in this new attempt strictly aligned with the original goal. \
@@ -286,6 +321,15 @@ Do not introduce changes unrelated to the original goal.",
                                 // Judge failure is non-fatal — log and continue.
                                 warn!(error = %e, "Drift judge failed (non-fatal, continuing)");
                             }
+                        }
+
+                        // LOGIC-6 fix: cap turn_summaries to the last window_size entries
+                        // after each check so the vec doesn't grow unboundedly over a
+                        // long-running phase.
+                        let keep = dp.config.window_size;
+                        if turn_summaries.len() > keep {
+                            let drain_end = turn_summaries.len() - keep;
+                            turn_summaries.drain(..drain_end);
                         }
                     }
                 }

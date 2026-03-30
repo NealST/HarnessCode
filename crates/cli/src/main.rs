@@ -1334,6 +1334,13 @@ async fn main() {
                     let (icon, label) = stage_label(role);
                     eprintln!("  ⚠️   {icon}  {label}   aborted: {reason}");
                 }
+                PipelineEvent::DriftDetected { kind, reason } => {
+                    if let Some(ref pb) = current_pb {
+                        pb.set_message(format!("  🔀  Drift detected [{kind}]: {reason}"));
+                    } else {
+                        eprintln!("  🔀  Drift detected [{kind}]: {reason}");
+                    }
+                }
             }
         }
 
