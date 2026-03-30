@@ -31,17 +31,30 @@ impl JudgeAgent {
                 .to_string(),
             ready_for_scoper: route == "scoper",
             ready_for_planner: route == "planner",
-            ask_user_clarification: payload
-                .get("ask_user_clarification")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(route == "clarify"),
+            // LOGIC-6: if route=clarify, always ask for clarification — even if the LLM
+            // returned an inconsistent explicit false for ask_user_clarification.
+            ask_user_clarification: if route == "clarify" {
+                true
+            } else {
+                payload
+                    .get("ask_user_clarification")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            },
+            // BUG-5: fall back to current_request (not the entire RequestContext JSON) when
+            // the LLM's effective_request field is missing or blank.
             effective_request: payload
                 .get("effective_request")
                 .and_then(|value| value.as_str())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .unwrap_or(request_context_json)
-                .to_string(),
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    serde_json::from_str::<serde_json::Value>(request_context_json)
+                        .ok()
+                        .and_then(|v| v.get("current_request").and_then(|v| v.as_str()).map(str::to_string))
+                        .unwrap_or_default()
+                }),
             decision_factors: JudgeDecisionFactors {
                 goal_is_concrete: payload
                     .get("decision_factors")

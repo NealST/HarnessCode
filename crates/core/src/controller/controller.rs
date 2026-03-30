@@ -95,7 +95,7 @@ impl ExecutionGuardTemplate {
 
     /// Build a guard for the Scoper's read-only framing loop.
     fn build_scoper(&self) -> ExecutionGuard {
-        ExecutionGuard::new(self.max_tool_turns.min(8))
+        ExecutionGuard::new(self.max_tool_turns.min(20))
     }
 }
 
@@ -114,11 +114,29 @@ fn synthetic_scope(request_context: &RequestContext, effective_request: &str) ->
     } else {
         vec!["The user request is already sufficiently specific"]
     };
+    // Infer task_type from keywords so that session memory carries a useful value
+    // instead of always "other" when the Scoper is bypassed.
+    let inferred_task_type = {
+        let lower = prompt.to_lowercase();
+        if lower.contains("fix") || lower.contains("bug") || lower.contains("error") || lower.contains("crash") {
+            "bugfix"
+        } else if lower.contains("refactor") || lower.contains("clean") || lower.contains("rename") || lower.contains("move") {
+            "refactor"
+        } else if lower.contains("doc") || lower.contains("comment") || lower.contains("readme") {
+            "docs"
+        } else if lower.contains("add") || lower.contains("implement") || lower.contains("create") || lower.contains("support") || lower.contains("test") {
+            "feature"
+        } else if lower.contains("review") || lower.contains("audit") || lower.contains("check") {
+            "review"
+        } else {
+            "other"
+        }
+    };
     AgentOutput {
         role: AgentRole::Scoper,
         summary: "Problem framed from a well-specified request".to_string(),
         payload: serde_json::json!({
-            "task_type": "other",
+            "task_type": inferred_task_type,
             "objective": prompt,
             "problem_statement": prompt,
             "in_scope": ["Implement the user request exactly as stated"],
@@ -305,13 +323,14 @@ impl Controller {
         let judge = JudgeAgent {
             llm: Arc::clone(&self.llm),
         };
-        let scoper_obs = obs.child(pipeline_span_id);
-        let scoper_guard = Arc::new(self.guard_template.build_scoper());
-        let scoper = LlmScoperAgent {
+        // BUG-6 fix: create a fresh LlmScoperAgent (with a fresh guard) for every
+        // scoper.execute() call so retries and clarification re-runs start with a
+        // full turn budget instead of a depleted one.
+        let make_scoper = || LlmScoperAgent {
             llm: Arc::clone(&self.llm),
             registry: Arc::clone(&sensor_registry),
-            guard: scoper_guard,
-            obs: scoper_obs,
+            guard: Arc::new(self.guard_template.build_scoper()),
+            obs: obs.child(pipeline_span_id),
         };
 
         // ── Stage 0: Judge ───────────────────────────────────────────────
@@ -465,7 +484,7 @@ impl Controller {
                                 SessionMemoryPatch {
                                     persistent_summary: request_context.session_state.persistent_summary.clone(),
                                     clarified_facts: request_context.session_state.clarified_facts.clone(),
-                                    open_questions: request_context.session_state.open_questions.clone(),
+                                    open_questions: Some(request_context.session_state.open_questions.clone()),
                                     ..SessionMemoryPatch::default()
                                 },
                             )
@@ -515,6 +534,9 @@ impl Controller {
         // Give the user a chance to skip the Scoper before the LLM call.
         // The callback is invoked only when the Judge explicitly routed to Scoper.
         let should_run_scoper = if should_run_scoper {
+            // MISSING-1 fix: emit StageStarted before the skip callback so consumers
+            // always see a paired Start event regardless of the skip resolution.
+            send!(PipelineEvent::StageStarted { role: AgentRole::Scoper });
             if let Some(ref cb) = scoper_skip_callback {
                 match cb(effective_request_override.clone()).await {
                     ScoperSkipDecision::Skip => {
@@ -527,14 +549,14 @@ impl Controller {
                 true
             }
         } else {
+            // LOGIC-4 fix: Judge routed directly to Planner — emit StageSkipped so
+            // consumers don’t see the Scoper stage stuck as "pending".
+            send!(PipelineEvent::StageSkipped { role: AgentRole::Scoper });
             false
         };
-        if should_run_scoper {
-            send!(PipelineEvent::StageStarted { role: AgentRole::Scoper });
-        }
         let stage_timer = SpanTimer::start();
         let mut scope_result = if should_run_scoper {
-            Some(scoper.execute(&scoper_input).await)
+            Some(make_scoper().execute(&scoper_input).await)
         } else {
             None
         };
@@ -572,8 +594,13 @@ impl Controller {
                 // the same input before giving up — transient LLM formatting issues
                 // should not be immediately fatal.
                 warn!("Scoper attempt 1 returned !success ({}); retrying once", o.summary);
+                send!(PipelineEvent::StageRetrying {
+                    role: AgentRole::Scoper,
+                    reason: o.summary.clone(),
+                    attempt: 1,
+                });
                 let retry_timer = SpanTimer::start();
-                let retry_result = scoper.execute(&scoper_input).await;
+                let retry_result = make_scoper().execute(&scoper_input).await;
                 let retry_tokens = retry_result.as_ref().ok().and_then(|o| o.tokens);
                 if let Some(t) = retry_tokens { pipeline_tokens.add(t); }
                 let retry_span_status = match &retry_result {
@@ -647,13 +674,13 @@ impl Controller {
                             SessionMemoryPatch {
                                 persistent_summary: request_context.session_state.persistent_summary.clone(),
                                 clarified_facts: request_context.session_state.clarified_facts.clone(),
-                                open_questions: request_context.session_state.open_questions.clone(),
+                                open_questions: Some(request_context.session_state.open_questions.clone()),
                                 ..SessionMemoryPatch::default()
                             },
                         )
                         .await?;
                         let retry_timer = SpanTimer::start();
-                        scope_result = Some(scoper.execute(&serde_json::json!({
+                        scope_result = Some(make_scoper().execute(&serde_json::json!({
                             "request_context": request_context,
                             "effective_request": effective_request_override,
                         }).to_string()).await);
@@ -714,7 +741,7 @@ impl Controller {
                     .and_then(|value| value.as_str())
                     .map(|objective| format!("Scoped objective: {objective}")),
                 known_relevant_files: payload_strings(&scoped.payload, "relevant_files"),
-                open_questions: payload_strings(&scoped.payload, "clarifying_questions"),
+                open_questions: Some(payload_strings(&scoped.payload, "clarifying_questions")),
                 last_scope: Some(scoped.payload.clone()),
                 ..SessionMemoryPatch::default()
             },
@@ -747,16 +774,21 @@ impl Controller {
             info!(attempt, "Starting pipeline run");
 
             // Compute agents needed for this attempt.
-            let planner_guard   = Arc::new(self.guard_template.build_planner());
-            let planner_obs     = obs.child(pipeline_span_id);
-            let planner = LlmPlannerAgent {
+            // BUG-7 fix: use a closure so each planner.execute() call (including the
+            // !success retry) starts with a fresh guard and a full turn budget.
+            let make_planner = || LlmPlannerAgent {
                 llm:      Arc::clone(&self.llm),
                 registry: Arc::clone(&sensor_registry),
-                guard:    planner_guard,
-                obs:      planner_obs,
+                guard:    Arc::new(self.guard_template.build_planner()),
+                obs:      obs.child(pipeline_span_id),
             };
             let risk_agent = LlmRiskAgent     { llm: Arc::clone(&self.llm) };
             let reviewer   = LlmReviewerAgent { llm: Arc::clone(&self.llm) };
+
+            // DESIGN-6: Warn when replanning with a stale scope on retry.
+            if attempt > 1 {
+                warn!(attempt, "Retrying with stale scope; a fresh Scoper run may improve results");
+            }
 
             // ── Stage 1: Planning ────────────────────────────────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Planner });
@@ -767,7 +799,7 @@ impl Controller {
                     "effective_request": effective_prompt,
                 "problem_frame": scoped.payload,
             }).to_string();
-            let plan_result = planner.execute(&planner_input).await;
+            let plan_result = make_planner().execute(&planner_input).await;
             let plan_tokens = plan_result.as_ref().ok().and_then(|o| o.tokens);
             if let Some(t) = plan_tokens { pipeline_tokens.add(t); }
             let plan_span_status = match &plan_result {
@@ -793,7 +825,7 @@ impl Controller {
                         attempt: 1,
                     });
                     let retry_timer = SpanTimer::start();
-                    let retry_result = planner.execute(&planner_input).await;
+                    let retry_result = make_planner().execute(&planner_input).await;
                     let retry_tokens = retry_result.as_ref().ok().and_then(|o2| o2.tokens);
                     if let Some(t) = retry_tokens { pipeline_tokens.add(t); }
                     let retry_span_status = match &retry_result {
@@ -815,13 +847,17 @@ impl Controller {
                         }
                         Ok(o2) if !o2.success => {
                             warn!(role = %o2.role, "Planner retry also failed: {}", o2.summary);
-                            send!(PipelineEvent::PipelineFailed {
-                                error: format!("Planner failed after retry: {}", o2.summary),
-                            });
                             if attempt >= self.max_retries {
+                                send!(PipelineEvent::PipelineFailed {
+                                    error: format!("Planner failed after retry: {}", o2.summary),
+                                });
                                 result = Err(AgentError::MaxRetriesExceeded(self.max_retries));
                                 break;
                             }
+                            send!(PipelineEvent::PipelineRetrying {
+                                reason: format!("Planner failed: {}", o2.summary),
+                                attempt: attempt + 1,
+                            });
                             continue;
                         }
                         Ok(o2) => o2,
@@ -907,6 +943,9 @@ impl Controller {
             // Maintained in lock-step with all_phase_outputs to avoid O(n²) rebuilds
             // inside the phase loop.
             let mut completed_phase_summaries: Vec<serde_json::Value> = Vec::new();
+            // BUG-1 fix: accumulate token usage from all successful phases so
+            // StageCompleted and code_output carry a real figure instead of None.
+            let mut conductor_phase_tokens = TokenUsage::default();
             let mut conductor_failed = false;
             let mut conductor_error: Option<AgentError> = None;
             let mut drift_occurred = false;
@@ -1055,8 +1094,12 @@ impl Controller {
                             title: phase_title.clone(),
                             reason: o.summary.clone(),
                         });
-                        send!(PipelineEvent::PipelineFailed {
-                            error: format!("Phase {phase_id} ({phase_title}) failed: {}", o.summary),
+                        // BUG-3 fix: don’t emit PipelineFailed here — the outer retry loop
+                        // decides whether to retry or give up. PipelineFailed is terminal;
+                        // emitting it prematurely breaks consumers when retries remain.
+                        conductor_error = Some(AgentError::ExecutionFailed {
+                            role: AgentRole::Conductor,
+                            message: format!("Phase {phase_id} ({phase_title}) failed: {}", o.summary),
                         });
                         conductor_failed = true;
                         break 'phases;
@@ -1106,10 +1149,14 @@ impl Controller {
                         )
                         .await?;
                         completed_phase_summaries.push(serde_json::json!({
-                            "phase_id":      o.payload.get("phase_id"),
-                            "explanation":   o.payload.get("explanation"),
-                            "files_changed": o.payload.get("files_changed"),
+                            "phase_id":       o.payload.get("phase_id"),
+                            "explanation":    o.payload.get("explanation"),
+                            "files_changed":  o.payload.get("files_changed"),
+                            "affected_files": o.payload.get("affected_files"),
                         }));
+                        // BUG-1 fix: accumulate per-phase tokens.
+                        // TokenUsage is Copy so phase_span_tokens is still valid here.
+                        conductor_phase_tokens.add(phase_span_tokens);
                         all_phase_outputs.push(o.payload.clone());
                     }
                 }
@@ -1127,23 +1174,47 @@ impl Controller {
                             result = Err(AgentError::MaxRetriesExceeded(self.max_retries));
                             break;
                         }
-                        send!(PipelineEvent::PipelineFailed {
-                            error: "Drift detected — restarting with reinforced prompt".into()
+                        // BUG-2 fix: PipelineRetrying (not PipelineFailed) — the pipeline
+                        // continues! PipelineFailed is semantically terminal.
+                        send!(PipelineEvent::PipelineRetrying {
+                            reason: "Drift detected — restarting with reinforced prompt".into(),
+                            attempt: attempt + 1,
                         });
                         continue;
                     }
-                    // DriftAborted
+                    // DriftAborted — PipelineFailed already emitted inside the phase loop.
                     result = Err(conductor_error.unwrap_or(AgentError::DriftAborted));
                     break;
                 }
                 // Normal phase failure — consume a retry slot.
                 if attempt >= self.max_retries {
+                    let err_msg = conductor_error.as_ref()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "Max retries exceeded".to_string());
+                    send!(PipelineEvent::PipelineFailed { error: err_msg });
                     result = Err(conductor_error.unwrap_or_else(|| AgentError::MaxRetriesExceeded(self.max_retries)));
                     break;
                 }
+                // LOGIC-5 fix: signal that a retry is starting so consumers don’t jump
+                // from PhaseFailed directly to the next StageStarted silently.
+                send!(PipelineEvent::PipelineRetrying {
+                    reason: conductor_error.as_ref().map(|e| e.to_string())
+                        .unwrap_or_else(|| "Phase execution failed".to_string()),
+                    attempt: attempt + 1,
+                });
                 continue;
             }
 
+            // BUG-1 fix: use the accumulated conductor_phase_tokens instead of trying
+            // to read _prompt_tokens/_completion_tokens from JSON payloads (those fields
+            // don’t exist — tokens live on AgentOutput.tokens, not the LLM JSON).
+            let conductor_total_tokens = if conductor_phase_tokens.prompt > 0
+                || conductor_phase_tokens.completion > 0
+            {
+                Some(conductor_phase_tokens)
+            } else {
+                None
+            };
             send!(PipelineEvent::StageCompleted {
                 output: AgentOutput {
                     role: AgentRole::Conductor,
@@ -1153,7 +1224,7 @@ impl Controller {
                         "total_phases": total_phases,
                     }),
                     success: true,
-                    tokens: None,
+                    tokens: conductor_total_tokens,
                 }
             });
 
@@ -1227,7 +1298,12 @@ impl Controller {
                     "phase_outputs": all_phase_outputs,
                 }),
                 success: true,
-                tokens: None,
+                // LOGIC-3 fix: use the accumulated conductor_phase_tokens.
+                tokens: if conductor_phase_tokens.prompt > 0 || conductor_phase_tokens.completion > 0 {
+                    Some(conductor_phase_tokens)
+                } else {
+                    None
+                },
             };
 
             // ── Stage 3: Risk (informational, never retries) ─────────────────
@@ -1242,9 +1318,10 @@ impl Controller {
                 "affected_files":  code_output.payload["affected_files"],
                 "actual_changes":  code_output.payload["actual_changes"],
             });
-            // If there is genuinely nothing to assess, skip the LLM call and
-            // immediately emit risk_unavailable rather than letting the LLM
-            // hallucinate a "low" verdict from an empty payload.
+            // DESIGN-4 fix: also consider files_changed>0 so that changes applied via
+            // run_command (sed -i, cargo fmt, etc.) are not silently skipped by Risk.
+            // If nothing was genuinely changed, skip the LLM call and emit risk_unavailable
+            // rather than letting the LLM hallucinate a "low" verdict from an empty payload.
             let no_changes = code_output.payload["actual_changes"]
                 .as_array()
                 .map(|a| a.is_empty())
@@ -1252,7 +1329,10 @@ impl Controller {
                 && code_output.payload["diff"]
                     .as_str()
                     .map(str::is_empty)
-                    .unwrap_or(true);
+                    .unwrap_or(true)
+                && code_output.payload["files_changed"]
+                    .as_u64()
+                    .unwrap_or(0) == 0;
             let risk_result: Result<AgentOutput, AgentError> = if no_changes {
                 warn!("Risk skipped: no actual file changes recorded");
                 Ok(AgentOutput {
@@ -1317,33 +1397,45 @@ impl Controller {
             // ── Stage 4: Review ──────────────────────────────────────────────
             send!(PipelineEvent::StageStarted { role: AgentRole::Reviewer });
             let stage_timer = SpanTimer::start();
+            // Exclude stale session-state fields (last_scope / last_plan from a prior run)
+            // to prevent the Reviewer from accidentally applying wrong success criteria.
+            // Pass effective_request + persistent_summary for user-intent context.
             let combined = serde_json::json!({
-                "request_context": request_context,
-                "scope": scoped.payload,
-                "plan": plan.payload,
-                "code_changes": code_output.payload,
-                "risk_assessment": risk_output.payload,
+                "effective_request":  effective_prompt,
+                "session_summary":    request_context.session_state.persistent_summary,
+                "scope":              scoped.payload,
+                "plan":               plan.payload,
+                "code_changes":       code_output.payload,
+                "risk_assessment":    risk_output.payload,
             });
             let context_for_reviewer = serde_json::to_string(&combined)?;
             let review_result = reviewer.execute(&context_for_reviewer).await;
             let review_tokens = review_result.as_ref().ok().and_then(|o| o.tokens);
             if let Some(t) = review_tokens { pipeline_tokens.add(t); }
-            // Reviewer always succeeds at producing a review (success = true always);
-            // the only failure path is an LLM/network error.
+            // Reviewer degrades gracefully on LLM/network error (mirrors Risk behaviour).
+            // A transient API timeout must not kill an already-completed execution.
             let review_span_status = match &review_result {
                 Ok(_) => SpanStatus::Ok,
                 Err(e) => SpanStatus::Error { message: e.to_string() },
             };
             obs.record(stage_timer.finish(obs.run_id, Some(pipeline_span_id), SpanKind::Stage { role: AgentRole::Reviewer, attempt }, review_span_status, review_tokens));
-            let review = match review_result {
-                Err(e) => {
-                    maybe_send_network_error!(e, AgentRole::Reviewer);
-                    send!(PipelineEvent::PipelineFailed { error: e.to_string() });
-                    result = Err(e);
-                    break;
+            let review = review_result.unwrap_or_else(|e| {
+                warn!(error = %e, "Reviewer agent failed (non-fatal, advisory unavailable)");
+                AgentOutput {
+                    role: AgentRole::Reviewer,
+                    summary: format!("Review unavailable: {e}"),
+                    payload: serde_json::json!({
+                        "approved": false,
+                        "criteria_met": false,
+                        "issues": [format!("Review could not be completed: {e}")],
+                        "security_concerns": [],
+                        "recommendation": "Review agent encountered an error — please inspect the changes manually.",
+                        "review_unavailable": true,
+                    }),
+                    success: false,
+                    tokens: None,
                 }
-                Ok(o) => o,
-            };
+            });
             send!(PipelineEvent::StageCompleted { output: review.clone() });
             // Emit a structured event so consumers display the full review without
             // needing to parse raw JSON from the StageCompleted payload.
@@ -1400,6 +1492,7 @@ impl Controller {
                 let agent    = CompactorAgent { llm: Arc::clone(&self.llm), store: Arc::clone(store) };
                 let sid      = session_id.to_string();
                 let snapshot = memory.clone();
+                // DESIGN-2: compact() returns () and logs internally; spawn fire-and-forget.
                 tokio::spawn(async move { agent.compact(&sid, snapshot).await });
             }
             result = Ok(vec![judge_output.clone(), scoped.clone(), plan, code_output, risk_output, review]);
@@ -1836,19 +1929,22 @@ mod tests {
             .run("refactor two modules")
             .await
             .unwrap();
-        assert_eq!(outputs.len(), 6);
-        assert!(outputs.iter().all(|o| o.success));
-        // The Conductor stage output should contain both phases in order.
-        let conductor_out = outputs.iter().find(|o| o.role == AgentRole::Conductor).unwrap();
-        let phases = conductor_out.payload["phases"].as_array().unwrap();
-        assert_eq!(phases.len(), 2);
-        assert_eq!(phases[0]["phase_id"], 1);
-        assert_eq!(phases[1]["phase_id"], 2);
-        // The second phase should have been given the first phase's summary in completed_phases.
-        // (We cannot inspect what was passed to the LLM here, but correctness of the data
-        //  is covered by the phase_id and explanation fields being present in the output.)
-        assert_eq!(phases[0]["explanation"], "Phase one done");
-        assert_eq!(phases[1]["explanation"], "Phase two done");
+        eprintln!("Outputs count: {}", outputs.len());
+        for (i, out) in outputs.iter().enumerate() {
+            eprintln!("  [{}] role={:?}, success={}", i, out.role, out.success);
+        }
+        assert_eq!(outputs.len(), 6, "Expected 6 agent outputs");
+        assert!(outputs.iter().all(|o| o.success), "All agents should succeed");
+        // The Conductor stage output should contain both phase_outputs in order.
+        let conductor_out = outputs.iter().find(|o| o.role == AgentRole::Conductor)
+            .expect("Conductor agent should be in outputs");
+        let phase_outputs = conductor_out.payload["phase_outputs"].as_array()
+            .expect("Conductor should have phase_outputs array");
+        assert_eq!(phase_outputs.len(), 2, "Should have 2 phase outputs");
+        assert_eq!(phase_outputs[0]["phase_id"], 1);
+        assert_eq!(phase_outputs[1]["phase_id"], 2);
+        assert_eq!(phase_outputs[0]["explanation"], "Phase one done");
+        assert_eq!(phase_outputs[1]["explanation"], "Phase two done");
     }
 
     #[tokio::test]

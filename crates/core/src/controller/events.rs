@@ -134,6 +134,20 @@ pub enum PipelineEvent {
     },
     /// The pipeline failed (agent error, guardrail, or max retries exceeded).
     PipelineFailed { error: String },
+    /// The pipeline is restarting after a recoverable failure (e.g. phase failure within
+    /// retry budget, or drift-triggered prompt reinforcement).
+    ///
+    /// Consumers should reset per-stage UI state and wait for a fresh wave of
+    /// `StageStarted` events.  This is distinct from `PipelineFailed` which is terminal.
+    PipelineRetrying {
+        /// Human-readable reason for the restart.
+        reason: String,
+        /// Which outer retry attempt this will be (1-based).
+        attempt: usize,
+    },
+    /// An agent stage was abandoned mid-execution (e.g. the Conductor was aborted
+    /// due to a phase failure and the pipeline is about to retry from the Planner).
+    StageAborted { role: AgentRole, reason: String },
     /// An agent stage was intentionally skipped by the user.
     StageSkipped { role: AgentRole },
     /// An agent stage failed and is being retried.

@@ -55,6 +55,11 @@ PHASE 2 — FRAME THE PROBLEM (your final response, no tools):
 Do not include any text outside the JSON object.";
 
 /// Build the user message for a scoping request.
+///
+/// The `task` argument may be either a plain string (from `run_single_agent`)
+/// or a JSON object with `effective_request` and `request_context` keys (from
+/// the main pipeline).  Both shapes are handled: JSON is unpacked so the LLM
+/// receives a clean natural-language request, never a raw JSON blob.
 pub fn user_message(task: &str) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -63,11 +68,69 @@ pub fn user_message(task: &str) -> String {
     let root = std::path::Path::new(&cwd);
     let project_context = agents_md::ensure_complete(root);
 
+    // Unpack the JSON envelope emitted by the Controller, falling back to treating
+    // the whole string as a plain user request (used by run_single_agent).
+    let (user_request, context_hint) =
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(task) {
+            // BUG-5 fix: fall back to current_request, not the entire JSON blob.
+            let effective = parsed
+                .get("effective_request")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    parsed
+                        .pointer("/request_context/current_request")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                });
+
+            // LOGIC-2 fix: render all relevant session context fields so the Scoper
+            // has clarified facts, previously-identified files, and the session summary.
+            let rc = parsed.get("request_context");
+            let ss = rc.and_then(|v| v.get("session_state"));
+
+            let mut ctx_parts: Vec<String> = Vec::new();
+            if let Some(s) = ss
+                .and_then(|v| v.get("persistent_summary"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                ctx_parts.push(format!("Summary: {s}"));
+            }
+            if let Some(facts) = ss
+                .and_then(|v| v.get("clarified_facts"))
+                .and_then(|v| v.as_array())
+                .filter(|a| !a.is_empty())
+            {
+                let items: Vec<&str> = facts.iter().filter_map(|v| v.as_str()).collect();
+                ctx_parts.push(format!("Clarified facts: {}", items.join("; ")));
+            }
+            if let Some(files) = ss
+                .and_then(|v| v.get("known_relevant_files"))
+                .and_then(|v| v.as_array())
+                .filter(|a| !a.is_empty())
+            {
+                let items: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
+                ctx_parts.push(format!("Previously identified files: {}", items.join(", ")));
+            }
+
+            let context_hint = if ctx_parts.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n--- Session context ---\n{}\n---", ctx_parts.join("\n"))
+            };
+            (effective, context_hint)
+        } else {
+            (task.to_string(), String::new())
+        };
+
     format!(
         "Working directory: {cwd}\n\n\
          --- AGENTS.md (project context) ---\n\
          {project_context}\n\
          --- end AGENTS.md ---\n\n\
-         User request: {task}"
+         User request: {user_request}{context_hint}"
     )
 }

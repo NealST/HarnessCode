@@ -59,6 +59,12 @@ Do not include any text outside the JSON object in your final response.";
 /// Loads (or auto-generates) the project's `AGENTS.md` file so the Planner
 /// starts with a complete project overview, structure, build/test commands,
 /// and code-style conventions — no raw directory crawling needed.
+///
+/// The `task` argument is a JSON object with keys:
+/// - `effective_request` — the Judge-resolved request (primary input)
+/// - `user_request`      — the original raw prompt (shown when it differs from effective)
+/// - `problem_frame`     — the Scoper's structured problem frame
+/// - `request_context`   — full session context (history, clarified facts, known files)
 pub fn user_message(task: &str) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -67,11 +73,80 @@ pub fn user_message(task: &str) -> String {
     let root = std::path::Path::new(&cwd);
     let project_context = agents_md::ensure_complete(root);
 
+    // Unpack the JSON envelope so the Planner receives clear labelled sections
+    // rather than a raw JSON blob.
+    let (effective_request, original_request_hint, problem_frame_section, session_context_section) =
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(task) {
+            let req = parsed
+                .get("effective_request")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(task)
+                .to_string();
+
+            // MISSING-2 fix: show the original user_request when it differs from effective_request
+            // (e.g. after a drift-restart, effective_request becomes a reinforcement message).
+            let original_hint = parsed
+                .get("user_request")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty() && *s != req.as_str())
+                .map(|s| format!("\nOriginal request (for reference): {s}"))
+                .unwrap_or_default();
+
+            let frame = if let Some(pf) = parsed.get("problem_frame") {
+                format!(
+                    "\n\n--- Problem frame (from Scoper) ---\n{}\n--- end problem frame ---",
+                    serde_json::to_string_pretty(pf).unwrap_or_default()
+                )
+            } else {
+                String::new()
+            };
+
+            // LOGIC-1 fix: render session context so the Planner knows about
+            // clarified facts, previously-identified files, and prior-session summary.
+            let rc = parsed.get("request_context");
+            let ss = rc.and_then(|v| v.get("session_state"));
+
+            let mut ctx_parts: Vec<String> = Vec::new();
+            if let Some(s) = ss
+                .and_then(|v| v.get("persistent_summary"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                ctx_parts.push(format!("Summary: {s}"));
+            }
+            if let Some(facts) = ss
+                .and_then(|v| v.get("clarified_facts"))
+                .and_then(|v| v.as_array())
+                .filter(|a| !a.is_empty())
+            {
+                let items: Vec<&str> = facts.iter().filter_map(|v| v.as_str()).collect();
+                ctx_parts.push(format!("Clarified facts: {}", items.join("; ")));
+            }
+            if let Some(files) = ss
+                .and_then(|v| v.get("known_relevant_files"))
+                .and_then(|v| v.as_array())
+                .filter(|a| !a.is_empty())
+            {
+                let items: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
+                ctx_parts.push(format!("Previously identified files: {}", items.join(", ")));
+            }
+            let session_ctx = if ctx_parts.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n--- Session context ---\n{}\n---", ctx_parts.join("\n"))
+            };
+
+            (req, original_hint, frame, session_ctx)
+        } else {
+            (task.to_string(), String::new(), String::new(), String::new())
+        };
+
     format!(
         "Working directory: {cwd}\n\n\
          --- AGENTS.md (project context) ---\n\
          {project_context}\n\
          --- end AGENTS.md ---\n\n\
-         Task: {task}"
+         Task: {effective_request}{original_request_hint}{session_context_section}{problem_frame_section}"
     )
 }

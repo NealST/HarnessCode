@@ -132,8 +132,8 @@ pub struct SessionMemoryPatch {
     pub effective_requests: Vec<String>,
     #[serde(default)]
     pub known_relevant_files: Vec<String>,
-    #[serde(default)]
-    pub open_questions: Vec<String>,
+    /// `None` → no update;  `Some(vec![])` → clear the list;  `Some([...])` → replace.
+    pub open_questions: Option<Vec<String>>,
     pub last_scope: Option<serde_json::Value>,
     pub last_plan: Option<serde_json::Value>,
     /// A completed exchange to append to the session's conversation history.
@@ -162,7 +162,7 @@ impl SessionMemoryPatch {
             && self.clarified_facts.is_empty()
             && self.effective_requests.is_empty()
             && self.known_relevant_files.is_empty()
-            && self.open_questions.is_empty()
+            && self.open_questions.is_none()
             && self.last_scope.is_none()
             && self.last_plan.is_none()
             && self.new_conversation_turn.is_none()
@@ -352,10 +352,9 @@ pub fn apply_patch(memory: &mut SessionMemory, patch: SessionMemoryPatch) {
     truncate_vec(&mut memory.effective_requests, MAX_EFFECTIVE_REQUESTS);
     merge_unique(&mut memory.known_relevant_files, patch.known_relevant_files);
     truncate_vec(&mut memory.known_relevant_files, MAX_KNOWN_RELEVANT_FILES);
-    // open_questions: only replace when the patch actually supplies new ones;
-    // an empty Vec means "no update" to preserve questions from earlier turns.
-    if !patch.open_questions.is_empty() {
-        memory.open_questions = patch.open_questions;
+    // open_questions: None means "no update"; Some([]) means "clear"; Some([...]) means "replace".
+    if let Some(questions) = patch.open_questions {
+        memory.open_questions = questions;
     }
     if let Some(last_scope) = patch.last_scope {
         memory.last_scope = Some(last_scope);

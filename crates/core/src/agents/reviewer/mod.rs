@@ -188,8 +188,10 @@ fn append_drift_issue(payload: &mut Value, issue: &str) {
         match issues_value {
             Value::Array(arr) => {
                 // Deduplicate: don't append if LLM already recorded the same files.
+                // Use char-based prefix to avoid panicking on multi-byte UTF-8 (e.g. CJK paths).
+                let prefix: String = issue.chars().take(40).collect();
                 let already_present = arr.iter().any(|v| {
-                    v.as_str().is_some_and(|s| s.contains(&issue[..issue.len().min(40)]))
+                    v.as_str().is_some_and(|s| s.contains(prefix.as_str()))
                 });
                 if !already_present {
                     arr.push(Value::String(issue.to_string()));

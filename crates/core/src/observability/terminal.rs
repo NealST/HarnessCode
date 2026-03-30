@@ -50,6 +50,7 @@ fn status_icon(status: &SpanStatus) -> &'static str {
         SpanStatus::Error { .. } => "✗",
         SpanStatus::Retried { .. } => "↺",
         SpanStatus::GuardrailTriggered { .. } => "⚠",
+        SpanStatus::Skipped { .. } => "⊘",
     }
 }
 

@@ -267,9 +267,9 @@ pub async fn run_tool_loop(
                                     }
                                     DriftDecision::Restart => {
                                         let reinforced = format!(
-                                            "原始目标：{original}\n\n在执行过程中，检测到以下偏移：{reason}\n\n\
-请确保新一轮的所有操作严格服务于原始目标，\
-不要引入与原始目标无关的更改。",
+                                            "Original goal: {original}\n\nDrift detected during execution: {reason}\n\n\
+Keep all actions in this new attempt strictly aligned with the original goal. \
+Do not introduce changes unrelated to the original goal.",
                                             original = dp.original_prompt,
                                             reason = reason,
                                         );

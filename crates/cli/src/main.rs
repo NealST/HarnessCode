@@ -994,6 +994,15 @@ async fn main() {
                                         if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
                                         eprintln!("  ❌  {error}");
                                     }
+                                    PipelineEvent::PipelineRetrying { reason, attempt } => {
+                                        if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                                        eprintln!("  🔄  Pipeline restarting (attempt {attempt}): {reason}");
+                                    }
+                                    PipelineEvent::StageAborted { role, reason } => {
+                                        if let Some(pb) = current_pb.take() { pb.finish_and_clear(); }
+                                        let (icon, label) = stage_label(role);
+                                        eprintln!("  ⚠️   {icon}  {label}   aborted: {reason}");
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1311,6 +1320,19 @@ async fn main() {
                     };
                     println!("        {icon}  Review: {colour}{recommendation}\x1b[0m");
                     println!();
+                }
+                PipelineEvent::PipelineRetrying { reason, attempt } => {
+                    if let Some(pb) = current_pb.take() {
+                        pb.finish_and_clear();
+                    }
+                    eprintln!("  🔄  Pipeline restarting (attempt {attempt}): {reason}");
+                }
+                PipelineEvent::StageAborted { role, reason } => {
+                    if let Some(pb) = current_pb.take() {
+                        pb.finish_and_clear();
+                    }
+                    let (icon, label) = stage_label(role);
+                    eprintln!("  ⚠️   {icon}  {label}   aborted: {reason}");
                 }
             }
         }

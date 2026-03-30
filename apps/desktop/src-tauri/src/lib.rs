@@ -149,6 +149,10 @@ pub enum PipelineEventDto {
         recommendation: String,
     },
     PipelineFailed { error: String },
+    /// The pipeline is restarting after a recoverable failure.
+    PipelineRetrying { reason: String, attempt: usize },
+    /// An agent stage was abandoned mid-execution before a pipeline retry.
+    StageAborted { role: String, reason: String },
     /// An agent stage was intentionally skipped by the user.
     StageSkipped { role: String },
     /// An agent stage failed and is being retried (in-stage, not a full pipeline retry).
@@ -271,6 +275,12 @@ impl From<PipelineEvent> for PipelineEventDto {
                 approved, criteria_met, issues, security_concerns, recommendation,
             },
             PipelineEvent::PipelineFailed { error } => Self::PipelineFailed { error },
+            PipelineEvent::PipelineRetrying { reason, attempt } =>
+                Self::PipelineRetrying { reason, attempt },
+            PipelineEvent::StageAborted { role, reason } => Self::StageAborted {
+                role: role.to_string().to_lowercase(),
+                reason,
+            },
             PipelineEvent::StageSkipped { role } => Self::StageSkipped {
                 role: role.to_string().to_lowercase(),
             },
