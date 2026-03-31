@@ -376,7 +376,8 @@ pub struct RunSummary {
 
 pub fn run() {
     // Load .env from the workspace root (silently ignored outside dev / when absent).
-    let _ = dotenvy::from_path(
+    // Use override variant so .env values take precedence over any stale shell vars.
+    let _ = dotenvy::from_path_override(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.env"),
     );
 

@@ -535,7 +535,9 @@ fn save_current_session(session_id: &str) {
 #[tokio::main]
 async fn main() {
     // Load .env from the workspace root (silently ignored if not present).
-    let _ = dotenvy::dotenv();
+    // Use override variant so .env values take precedence over any stale shell vars
+    // (e.g. an existing OPENAI_API_KEY pointing to openai.com instead of OpenRouter).
+    let _ = dotenvy::dotenv_override();
 
     let cli = Cli::parse();
 
