@@ -16,7 +16,10 @@ use harnesscode_core::{
         ClarificationCallback, ClarificationRequest, ClarificationResolution, Controller,
         PipelineEvent, RequestContext,
     },
-    memory::{FileSessionStore, SessionMemory, SessionMemoryPatch, SessionMemorySummary, SessionStore},
+    memory::{
+        FileSessionStore, SessionMemory, SessionMemoryPatch, SessionMemorySummary, SessionStore,
+        long_term::LongTermMemoryStore,
+    },
     observability::{CompositeSink, JsonLinesSink, SpanSink},
     skills::SkillRegistry,
 };
@@ -43,7 +46,14 @@ pub async fn start_pipeline(
 
     let mut request_context = request_context.unwrap_or_else(|| RequestContext::from_prompt(prompt.clone()));
     if request_context.session_id.is_none() {
-        request_context.session_id = Some("default".to_string());
+        // B3 fix: derive a stable per-project session ID so different projects
+        // don't share the same "default" session store entry.
+        let project_path_for_id: PathBuf = project_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let session_id = project_session_id(&project_path_for_id);
+        request_context.session_id = Some(session_id);
     }
 
     let llm = default_provider().map_err(|e| e.to_string())?;
@@ -74,20 +84,18 @@ pub async fn start_pipeline(
         c
     };
 
-    // Build the drift callback — emits a `pipeline:event` with type
-    // `drift_detected` and waits for the user to invoke `submit_drift_decision`.
+    // Build the drift callback — waits for the user to invoke `submit_drift_decision`.
+    //
+    // A2 fix: the DriftNotifyFn built in the controller fires PipelineEvent::DriftDetected
+    // through the mpsc channel → forwarder → app.emit, so we must NOT emit DriftDetected
+    // here too — that would deliver the event twice to the frontend.
     let drift_app = app.clone();
     let drift_callback: DriftCallback = Arc::new(move |signal| {
         let app = drift_app.clone();
         Box::pin(async move {
-            let (kind, reason) = match &signal {
-                DriftSignal::Drifted { kind, reason } => (kind.to_string(), reason.clone()),
+            match &signal {
                 DriftSignal::Aligned => return DriftDecision::Ignore,
-            };
-            // Emit the drift event to the frontend.
-            let dto = PipelineEventDto::DriftDetected { kind, reason };
-            if let Err(e) = app.emit("pipeline:event", &dto) {
-                tracing::warn!("emit drift_detected failed: {e}");
+                DriftSignal::Drifted { .. } => {}
             }
             // Create a oneshot channel; store the sender in shared state.
             let (tx, rx) = tokio::sync::oneshot::channel::<DriftDecision>();
@@ -122,14 +130,11 @@ pub async fn start_pipeline(
         })
     });
 
-    // Cancellation channel (best-effort; the pipeline checks for timeout guardrails).
-    let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel::<()>();
-    *state.cancel_tx.lock().await = Some(cancel_tx);
-
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(32);
 
     let app_clone = app.clone();
-    tokio::spawn(async move {
+    // A1 fix: store the AbortHandle so cancel_pipeline can actually stop the task.
+    let handle = tokio::spawn(async move {
         // Forward PipelineEvents to the frontend while the pipeline runs.
         let forwarder = {
             let app = app_clone.clone();
@@ -159,7 +164,8 @@ pub async fn start_pipeline(
                 stages: outputs
                     .iter()
                     .map(|o| StageSummary {
-                        role: o.role.to_string(),
+                        // E1 fix: use lowercase to match pipeline:event role strings.
+                        role: o.role.to_string().to_lowercase(),
                         summary: o.summary.clone(),
                         success: o.success,
                     })
@@ -175,16 +181,46 @@ pub async fn start_pipeline(
             tracing::warn!("emit pipeline:done failed: {e}");
         }
     });
+    // A1 fix: store the abort handle so cancel_pipeline can stop the task.
+    *state.pipeline_handle.lock().await = Some(handle.abort_handle());
 
     Ok(())
 }
 
-/// Drop the cancellation sender — signals the pipeline to stop on the next
-/// guardrail check (timeout boundary).
+/// Derive a stable, filesystem-safe session ID from a project path.
+/// Uses a simple hex digest so different project directories get different
+/// session histories without requiring any external crate.
+fn project_session_id(project_path: &std::path::Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let canonical = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf());
+    let mut h = DefaultHasher::new();
+    canonical.hash(&mut h);
+    format!("proj-{:016x}", h.finish())
+}
+
+/// Abort the running pipeline task immediately.
+///
+/// A1 fix: previously this dropped a oneshot sender whose receiver had already
+/// been dropped, making it a complete no-op.  Now it aborts the spawned task
+/// and emits `pipeline:done` so the frontend can clean up.
 #[tauri::command]
-pub async fn cancel_pipeline(state: State<'_, PipelineState>) -> Result<(), String> {
-    *state.cancel_tx.lock().await = None;
-    info!("cancel_pipeline: cancellation signal sent");
+pub async fn cancel_pipeline(
+    app: AppHandle,
+    state: State<'_, PipelineState>,
+) -> Result<(), String> {
+    if let Some(handle) = state.pipeline_handle.lock().await.take() {
+        handle.abort();
+        let done = crate::PipelineDoneEvent::Err { message: "Cancelled by user".into() };
+        if let Err(e) = app.emit("pipeline:done", &done) {
+            tracing::warn!("emit pipeline:done after cancel failed: {e}");
+        }
+        info!("cancel_pipeline: pipeline task aborted");
+    } else {
+        info!("cancel_pipeline: no running pipeline");
+    }
     Ok(())
 }
 
@@ -491,4 +527,67 @@ pub async fn invoke_skill_command(
                 .join(", ")
         )),
     }
+}
+
+// ──────────────────────────────────────────────
+// Long-term memory recall
+// ──────────────────────────────────────────────
+
+/// Serialisable mirror of [`MemoryCard`] for the frontend.
+#[derive(Debug, serde::Serialize)]
+pub struct MemoryCardDto {
+    pub id: String,
+    pub session_id: String,
+    pub created_at_secs: u64,
+    pub title: String,
+    pub problem: String,
+    pub solution: String,
+    pub key_patterns: Vec<String>,
+    pub tags: Vec<String>,
+    pub affected_files: Vec<String>,
+}
+
+/// Recall relevant memory cards for `query`, optionally limited to `top_k`.
+///
+/// Uses LLM reranking when a query is given; returns the most recent `top_k`
+/// cards when the query is empty.
+#[tauri::command]
+pub async fn recall_memories(
+    project_dir: Option<String>,
+    query: Option<String>,
+    top_k: Option<usize>,
+) -> Result<Vec<MemoryCardDto>, String> {
+    let project_path: PathBuf = project_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let store = LongTermMemoryStore::for_project(project_path);
+    let k = top_k.unwrap_or(5).max(1).min(100);
+
+    let cards = if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
+        let llm = default_provider().map_err(|e| e.to_string())?;
+        store
+            .recall_and_rerank(&llm, &q, k)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        let mut all = store.load_all().await.map_err(|e| e.to_string())?;
+        all.truncate(k);
+        all
+    };
+
+    Ok(cards
+        .into_iter()
+        .map(|c| MemoryCardDto {
+            id: c.id,
+            session_id: c.session_id,
+            created_at_secs: c.created_at_secs,
+            title: c.title,
+            problem: c.problem,
+            solution: c.solution,
+            key_patterns: c.key_patterns,
+            tags: c.tags,
+            affected_files: c.affected_files,
+        })
+        .collect())
 }

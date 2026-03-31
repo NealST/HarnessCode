@@ -34,19 +34,29 @@ pub mod commands;
 pub mod obs;
 
 use harnesscode_core::agents::DriftDecision;
+use harnesscode_core::agents::MemoryDistillerAgent;
+use harnesscode_core::config::default_provider;
 use harnesscode_core::controller::{ClarificationResolution, PipelineEvent};
+use harnesscode_core::memory::{
+    FileSessionStore, SessionStore,
+    long_term::LongTermMemoryStore,
+    scheduler::{MemoryScheduler, RememberConfig},
+};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 // ──────────────────────────────────────────────
 // Shared app state
 // ──────────────────────────────────────────────
 
-/// Holds an optional cancellation sender for the currently running pipeline.
+/// Holds an optional abort handle for the currently running pipeline task.
 /// Only one pipeline runs at a time from the desktop UI.
 #[derive(Default)]
 pub struct PipelineState {
-    pub cancel_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// `AbortHandle` for the outermost `tokio::spawn`ed pipeline task.
+    /// Replacing with `None` or calling `abort()` cancels the pipeline.
+    pub pipeline_handle: Mutex<Option<tokio::task::AbortHandle>>,
     /// Resolves the drift-decision oneshot when the user submits a decision
     /// via [`commands::submit_drift_decision`].  `None` when no drift prompt
     /// is currently active.
@@ -365,6 +375,11 @@ pub struct RunSummary {
 // ──────────────────────────────────────────────
 
 pub fn run() {
+    // Load .env from the workspace root (silently ignored outside dev / when absent).
+    let _ = dotenvy::from_path(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.env"),
+    );
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -376,6 +391,19 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(PipelineState::default())
+        .setup(|_app| {
+            // ── Nightly memory scheduler ───────────────────────────────────────
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            if let Ok(llm) = default_provider() {
+                let store: Arc<dyn SessionStore> =
+                    Arc::new(FileSessionStore::for_project(cwd.clone()));
+                let long_term = Arc::new(LongTermMemoryStore::for_project(cwd));
+                let distiller = MemoryDistillerAgent { llm: Arc::clone(&llm) };
+                let sched = MemoryScheduler::new(store, long_term, distiller, RememberConfig::default());
+                tauri::async_runtime::spawn(sched.run());
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::start_pipeline,
             commands::cancel_pipeline,
@@ -393,6 +421,7 @@ pub fn run() {
             commands::submit_clarification_response,
             commands::list_skills,
             commands::invoke_skill_command,
+            commands::recall_memories,
         ])
         .run(tauri::generate_context!())
         .expect("error while running HarnessCode desktop application");

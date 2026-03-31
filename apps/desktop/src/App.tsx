@@ -13,6 +13,7 @@ import ClarificationModal, {
 } from "@/components/ClarificationModal";
 import SettingsPanel from "@/components/SettingsPanel";
 import CommandResultView, { type CommandResult } from "@/components/CommandResultView";
+import MemoryPanel from "@/components/MemoryPanel";
 
 const CURRENT_SESSION_STORAGE_KEY = "harnesscode.currentSessionId.v1";
 
@@ -53,6 +54,7 @@ interface SessionStatePayload {
   last_plan: PlanReadyEvent | null;
   known_relevant_files: string[];
   open_questions: string[];
+  persistent_summary: string | null;
 }
 
 interface RequestContextPayload {
@@ -75,6 +77,7 @@ type BuiltinCmd =
   | { tag: "session_list" }
   | { tag: "session_use"; id: string | null }
   | { tag: "session_delete"; id: string }
+  | { tag: "remember"; query: string | null }
   | { tag: "skill_invoke"; name: string; args: string }
   | { tag: "unknown"; raw: string };
 
@@ -95,6 +98,10 @@ function parseBuiltin(input: string): BuiltinCmd | null {
     case "rename": {
       const fullName = withoutSlash.slice("rename".length).trim() || null;
       return { tag: "rename", name: fullName };
+    }
+    case "remember": {
+      const q = withoutSlash.slice("remember".length).trim() || null;
+      return { tag: "remember", query: q };
     }
     case "session":
       switch ((arg1 ?? "").toLowerCase()) {
@@ -128,6 +135,7 @@ const HELP_TEXT: CommandResult = {
     { variant: "kv", text: "/session list      : List all saved sessions" },
     { variant: "kv", text: "/session use [id]  : Switch to another session" },
     { variant: "kv", text: "/session delete id : Permanently delete a session" },
+    { variant: "kv", text: "/remember [query]  : Recall past solutions (LLM-reranked)" },
     { variant: "divider", text: "" },
     { variant: "dim", text: "Custom skills appear in autocomplete when you type /. Type /skill-name [args] to invoke." },
     { variant: "dim", text: "Anything else is sent to the AI pipeline." },
@@ -189,16 +197,15 @@ function buildRequestContext(
   if (lastScope) {
     executionSummaryParts.push(`Last scoped objective: ${lastScope.objective}`);
   }
-  if (lastPlan?.steps.length) {
+  if (lastPlan?.phases?.length) {
     executionSummaryParts.push(
-      `Last plan steps: ${lastPlan.steps.slice(0, 3).join("; ")}`,
+      `Last plan phases: ${lastPlan.phases.slice(0, 3).map((p) => p.title).join("; ")}`,
     );
   }
 
   const knownRelevantFiles = Array.from(
     new Set([
       ...(lastScope?.relevant_files ?? []),
-      ...(lastPlan?.affected_files ?? []),
     ]),
   );
 
@@ -216,6 +223,7 @@ function buildRequestContext(
         lastScope?.needs_user_clarification && lastScope.clarifying_questions.length
           ? lastScope.clarifying_questions
           : [],
+      persistent_summary: null,
     },
   };
 }
@@ -247,6 +255,14 @@ export default function App() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cmdPending, setCmdPending] = useState(false);
+  // ── Memory panel state ──────────────────────────────────────────────────────
+  const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
+  const [memoryPanelQuery, setMemoryPanelQuery] = useState("");
+  const [recallContext, setRecallContext] = useState<{
+    hint: string;
+    cardId: string;
+    cardTitle: string;
+  } | null>(null);
   // ── Skills autocomplete state ───────────────────────────────────────────────
   const [skills, setSkills] = useState<SkillSummaryDto[]>([]);
   const [skillHighlight, setSkillHighlight] = useState(0);
@@ -459,8 +475,14 @@ export default function App() {
             break;
           }
 
-          case "skill_invoke": {
-            try {
+          case "remember": {
+            // Open the memory panel; if a query was given it will auto-search.
+            setMemoryPanelQuery(parsed.query ?? "");
+            setMemoryPanelOpen(true);
+            break;
+          }
+
+          case "skill_invoke": {            try {
               const rendered = await invoke<string>("invoke_skill_command", {
                 name: parsed.name,
                 args: parsed.args || null,
@@ -522,6 +544,13 @@ export default function App() {
       const userMsgId = crypto.randomUUID();
       const agentMsgId = crypto.randomUUID();
       const requestContext = buildRequestContext(messages, currentSessionId, prompt);
+
+      // Inject recalled memory context into the next request (if the user
+      // attached a card via the memory panel).
+      if (recallContext) {
+        requestContext.session_state.persistent_summary = recallContext.hint;
+        setRecallContext(null);
+      }
 
       setMessages((prev) => [
         ...prev,
@@ -623,6 +652,17 @@ export default function App() {
         onSessionDeleted={() => setSessionRefreshKey((k) => k + 1)}
         onClose={() => setSettingsOpen(false)}
       />
+      <MemoryPanel
+        open={memoryPanelOpen}
+        initialQuery={memoryPanelQuery}
+        injectedCardId={recallContext?.cardId ?? null}
+        onClose={() => setMemoryPanelOpen(false)}
+        onInject={(hint, cardId, cardTitle) => {
+          setRecallContext({ hint, cardId, cardTitle });
+          setMemoryPanelOpen(false);
+        }}
+        onClearInject={() => setRecallContext(null)}
+      />
       {/* ── Drift modal (portal-like, renders on top) ── */}
       {driftPayload && (
         <DriftModal
@@ -648,6 +688,14 @@ export default function App() {
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => { setMemoryPanelQuery(""); setMemoryPanelOpen(true); }}
+            className="rounded-md p-1.5 text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
+            aria-label="Memory Recall"
+            title="Memory Recall (/remember)"
+          >
+            <span className="text-sm">🧠</span>
+          </button>
           <button
             onClick={() => setSettingsOpen(true)}
             className="rounded-md p-1.5 text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
@@ -747,6 +795,17 @@ export default function App() {
 
           {/* ── Input ── */}
           <div className="border-t border-gray-800 bg-gray-900/80 px-4 py-4 backdrop-blur">
+            {recallContext && (
+              <div className="mx-auto mb-2 flex max-w-3xl items-center gap-2 rounded-md border border-brand-700/50 bg-brand-900/40 px-3 py-1.5">
+                <span className="text-xs text-brand-300">🧠 记忆已附加：{recallContext.cardTitle}</span>
+                <button
+                  type="button"
+                  onClick={() => setRecallContext(null)}
+                  className="ml-auto text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                  aria-label="移除召回记忆"
+                >✕</button>
+              </div>
+            )}
             <form
               onSubmit={handleSubmit}
               className="mx-auto flex max-w-3xl gap-3 relative"
@@ -764,6 +823,7 @@ export default function App() {
                   { name: "clear",   description: "Wipe current session history", hint: "" },
                   { name: "rename",  description: "Rename current session", hint: "[name]" },
                   { name: "session", description: "Manage sessions (list|use|delete)", hint: "list|use|delete" },
+                  { name: "remember", description: "Recall past solutions (LLM-reranked)", hint: "[query]" },
                 ];
 
                 const matchedBuiltins = partial

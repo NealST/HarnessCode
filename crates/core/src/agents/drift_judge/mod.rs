@@ -8,6 +8,7 @@ pub mod context;
 
 use super::AgentError;
 use crate::llm::{LlmMessage, LlmProvider};
+use crate::observability::TokenUsage;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
@@ -178,11 +179,13 @@ pub struct DriftJudgeAgent {
 
 impl DriftJudgeAgent {
     /// Assess whether recent tool activity is still aligned with `original_prompt`.
+    /// Returns the drift signal together with the LLM token usage for the call
+    /// so callers can include it in observability spans.
     pub async fn judge(
         &self,
         original_prompt: &str,
         turns: &[TurnSummary],
-    ) -> Result<DriftSignal, AgentError> {
+    ) -> Result<(DriftSignal, TokenUsage), AgentError> {
         let user_content = serde_json::json!({
             "original_goal": original_prompt,
             "recent_turns": turns,
@@ -195,7 +198,9 @@ impl DriftJudgeAgent {
         ];
 
         let response = self.llm.complete(&messages).await?;
-        parse_drift_signal(&response.content)
+        let usage = TokenUsage::from(&response);
+        let signal = parse_drift_signal(&response.content)?;
+        Ok((signal, usage))
     }
 }
 
@@ -318,7 +323,7 @@ mod tests {
             response: r#"{"aligned":false,"kind":"direction","reason":"Agent is looping on read_file"}"#.into(),
         });
         let judge = DriftJudgeAgent { llm };
-        let signal = judge.judge("Fix the bug in main.rs", &one_turn()).await.unwrap();
+        let (signal, _tokens) = judge.judge("Fix the bug in main.rs", &one_turn()).await.unwrap();
         match signal {
             DriftSignal::Drifted { kind: DriftKind::Direction, reason } => {
                 assert!(reason.contains("loop"));
@@ -333,7 +338,7 @@ mod tests {
             response: r#"{"aligned":true}"#.into(),
         });
         let judge = DriftJudgeAgent { llm };
-        let signal = judge.judge("Fix the bug in main.rs", &[]).await.unwrap();
+        let (signal, _tokens) = judge.judge("Fix the bug in main.rs", &[]).await.unwrap();
         assert!(matches!(signal, DriftSignal::Aligned));
     }
 
@@ -343,7 +348,7 @@ mod tests {
             response: "```json\n{\"aligned\":false,\"kind\":\"scope\",\"reason\":\"unrelated work\"}\n```".into(),
         });
         let judge = DriftJudgeAgent { llm };
-        let signal = judge.judge("Fix the bug", &[]).await.unwrap();
+        let (signal, _tokens) = judge.judge("Fix the bug", &[]).await.unwrap();
         assert!(matches!(
             signal,
             DriftSignal::Drifted { kind: DriftKind::Scope, .. }

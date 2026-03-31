@@ -838,7 +838,7 @@ impl Controller {
                     };
                     obs.record(retry_timer.finish(
                         obs.run_id, Some(pipeline_span_id),
-                        SpanKind::Stage { role: AgentRole::Planner, attempt: 2 },
+                        SpanKind::Stage { role: AgentRole::Planner, attempt: attempt + 1 },
                         retry_span_status, retry_tokens,
                     ));
                     match retry_result {
@@ -954,8 +954,13 @@ impl Controller {
             let mut drift_occurred = false;
             let mut drift_reinforced_prompt: Option<String> = None;
 
-            'phases: for phase in &phases_arr {
-                let phase_id = phase.get("phase_id").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            'phases: for (phase_idx, phase) in phases_arr.iter().enumerate() {
+                // A4 fix: use the enumerate index as authoritative fallback so
+                // PhaseStarted never emits phase_id = 0 when the Planner omits the field.
+                let phase_id = {
+                    let from_planner = phase.get("phase_id").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    if from_planner > 0 { from_planner } else { phase_idx + 1 }
+                };
                 let phase_title = phase.get("title").and_then(|v| v.as_str()).unwrap_or("(untitled)").to_string();
 
                 send!(PipelineEvent::PhaseStarted {
@@ -1269,10 +1274,17 @@ impl Controller {
                     break;
                 }
                 // LOGIC-5 fix: signal that a retry is starting so consumers don’t jump
-                // from PhaseFailed directly to the next StageStarted silently.
+                // B1 fix: emit StageAborted before retry so CLI/desktop learns
+                // the Conductor stage was abandoned before the pipeline resets.
+                let abort_reason = conductor_error.as_ref()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "Phase execution failed".to_string());
+                send!(PipelineEvent::StageAborted {
+                    role: AgentRole::Conductor,
+                    reason: abort_reason.clone(),
+                });
                 send!(PipelineEvent::PipelineRetrying {
-                    reason: conductor_error.as_ref().map(|e| e.to_string())
-                        .unwrap_or_else(|| "Phase execution failed".to_string()),
+                    reason: abort_reason,
                     attempt: attempt + 1,
                 });
                 continue;

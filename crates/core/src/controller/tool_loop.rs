@@ -263,6 +263,9 @@ pub async fn run_tool_loop(
                         // BUG-1 fix: use `judge_prompt` (phase-scoped) for the LLM call,
                         // keep `original_prompt` clean for use in the reinforced restart.
                         let judge_result = dp.judge.judge(&dp.judge_prompt, window).await;
+                        // C1 fix: extract token usage from the judge result so the span
+                        // carries real cost data instead of always recording None.
+                        let judge_tokens = judge_result.as_ref().ok().map(|(_, u)| *u);
                         let judge_status = match &judge_result {
                             Ok(_)  => SpanStatus::Ok,
                             Err(e) => SpanStatus::Error { message: e.to_string() },
@@ -272,14 +275,14 @@ pub async fn run_tool_loop(
                             obs.current_span_id,
                             SpanKind::LlmRequest { turn, category: "drift_judge".into() },
                             judge_status,
-                            None,
+                            judge_tokens,
                         ));
 
                         match judge_result {
-                            Ok(DriftSignal::Aligned) => {
+                            Ok((DriftSignal::Aligned, _)) => {
                                 // On track — continue normally.
                             }
-                            Ok(signal @ DriftSignal::Drifted { .. }) => {
+                            Ok((signal @ DriftSignal::Drifted { .. }, _)) => {
                                 warn!(turn, "Drift detected — invoking callback for user decision");
                                 let (kind, reason) = match &signal {
                                     DriftSignal::Drifted { kind, reason } => (kind.clone(), reason.clone()),

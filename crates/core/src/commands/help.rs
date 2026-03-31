@@ -24,6 +24,7 @@ pub fn help_text() -> String {
      \x1b[36m  /rename [name]\x1b[0m            Rename current session (multi-word names supported)\n\
      \x1b[36m  /clear\x1b[0m                    Clear conversation history for current session\n\
      \x1b[36m  /cost\x1b[0m                     Show turn count and estimated token usage\n\
+     \x1b[36m  /remember [query]\x1b[0m         Recall past solutions (LLM-reranked)\n\
      \x1b[36m  /exit\x1b[0m  \x1b[36m/quit\x1b[0m             Exit HarnessCode\n\
      \n\
      \x1b[2m  Any other input is sent to the AI pipeline.\x1b[0m\n"

@@ -17,12 +17,14 @@ pub mod compactor;
 pub mod conductor;
 pub mod drift_judge;
 pub mod judge;
+pub mod memory_distiller;
 pub mod planner;
 pub mod reviewer;
 pub mod risk;
 pub mod scoper;
 
 pub use compactor::CompactorAgent;
+pub use memory_distiller::MemoryDistillerAgent;
 pub use conductor::LlmConductorAgent;
 pub use drift_judge::{
     DriftCallback, DriftConfig, DriftDecision, DriftJudgeAgent, DriftKind, DriftParams,

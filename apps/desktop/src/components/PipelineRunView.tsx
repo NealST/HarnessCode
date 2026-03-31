@@ -486,7 +486,6 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
   const networkErrors: { category: string; message: string; role: string }[] =
     [];
   // Track phase progress within the conductor stage
-  let activePhase: { id: number; title: string; total: number } | null = null;
   const completedPhases: number[] = [];
 
   for (const ev of events) {
@@ -499,7 +498,6 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
     } else if (ev.type === "plan_ready") {
       planReady = ev;
     } else if (ev.type === "phase_started") {
-      activePhase = { id: ev.phase_id, title: ev.title, total: ev.total_phases };
       stageStatus["conductor"] = {
         status: "running",
         summary: `Phase ${ev.phase_id}/${ev.total_phases}: ${ev.title}`,
@@ -510,7 +508,6 @@ export default function PipelineRunView({ events, done, onDismiss }: Props) {
         status: "running",
         summary: `Phase ${ev.phase_id}/${ev.total_phases} done — ${ev.explanation}`,
       };
-      if (ev.phase_id === ev.total_phases) activePhase = null;
     } else if (ev.type === "phase_retrying") {
       stageStatus["conductor"] = {
         status: "running",

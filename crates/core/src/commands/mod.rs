@@ -23,6 +23,7 @@ mod cost;
 mod exit;
 mod help;
 mod init;
+mod remember;
 mod rename;
 mod session;
 
@@ -95,6 +96,10 @@ pub enum BuiltinCommand {
     /// The input looked like a command but wasn't recognised by builtins OR
     /// skills.  Callers should display this message.
     Unknown(String),
+    /// Recall past solutions from long-term memory, optionally filtered by query.
+    ///
+    /// `None` → list the most-recent cards; `Some(q)` → LLM-reranked search.
+    Remember { query: Option<String> },
 }
 
 // ── Public parser ─────────────────────────────────────────────────────────────
@@ -151,6 +156,7 @@ pub fn parse_builtin(input: &str) -> Option<BuiltinCommand> {
         "session"            => session::parse(&t),
         "init"               => init::parse(&t),
         "scope" | "compact" => agent::parse(&t),
+        "remember"           => remember::parse(&t),
         other => BuiltinCommand::InvokeSkill {
             name: other.to_string(),
             args: after_cmd.to_string(),

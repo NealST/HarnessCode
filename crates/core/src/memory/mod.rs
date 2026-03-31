@@ -1,5 +1,8 @@
 //! Multi-session memory storage for long-lived conversation state.
 
+pub mod long_term;
+pub mod scheduler;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;

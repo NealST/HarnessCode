@@ -187,11 +187,11 @@ fn append_drift_issue(payload: &mut Value, issue: &str) {
             .or_insert_with(|| Value::Array(vec![]));
         match issues_value {
             Value::Array(arr) => {
-                // Deduplicate: don't append if LLM already recorded the same files.
-                // Use char-based prefix to avoid panicking on multi-byte UTF-8 (e.g. CJK paths).
-                let prefix: String = issue.chars().take(40).collect();
+                // C5 fix: compare the full issue string for deduplication instead of a
+                // 40-char prefix, which could cause false collisions on issues that share
+                // a common file path prefix but differ in the actual violation reported.
                 let already_present = arr.iter().any(|v| {
-                    v.as_str().is_some_and(|s| s.contains(prefix.as_str()))
+                    v.as_str().is_some_and(|s| s == issue)
                 });
                 if !already_present {
                     arr.push(Value::String(issue.to_string()));

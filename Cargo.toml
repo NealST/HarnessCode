@@ -20,6 +20,9 @@ authors = ["HarnessCode Contributors"]
 license = "MIT"
 
 [workspace.dependencies]
+# Env file loading (.env)
+dotenvy = "0.15"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

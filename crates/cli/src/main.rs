@@ -26,7 +26,7 @@
 
 use clap::{Parser, Subcommand};
 use harnesscode_core::{
-    agents::{AgentOutput, AgentRole},
+    agents::{AgentOutput, AgentRole, MemoryDistillerAgent},
     commands::{help_text, parse_builtin, BuiltinAgentKind, BuiltinCommand},
     config::{
         load_config, project_config_path, user_config_path,
@@ -37,7 +37,11 @@ use harnesscode_core::{
         PipelineEvent, RequestContext,
         ScoperSkipCallback, ScoperSkipDecision,
     },
-    memory::{FileSessionStore, SessionMemoryPatch, SessionStore},
+    memory::{
+        FileSessionStore, SessionMemoryPatch, SessionStore,
+        long_term::LongTermMemoryStore,
+        scheduler::{MemoryScheduler, RememberConfig},
+    },
     skills::SkillRegistry,
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -383,12 +387,22 @@ fn print_pipeline_result(outputs: &[AgentOutput]) {
             }
         }
 
-        // ── Planner: show numbered steps if present ──────────────────────────
+        // ── Planner: show phases + steps ────────────────────────────────────
         if output.role == AgentRole::Planner {
-            if let Some(steps) = output.payload.get("steps").and_then(|s| s.as_array()) {
-                for (i, step) in steps.iter().enumerate() {
-                    let text = step.as_str().unwrap_or_default();
-                    println!("        {}. {}", i + 1, text);
+            // A3 fix: steps are nested under phases[i].steps, not at the top level.
+            if let Some(phases) = output.payload.get("phases").and_then(|p| p.as_array()) {
+                for phase in phases {
+                    let phase_id = phase.get("phase_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let title = phase.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    if !title.is_empty() {
+                        println!("        Phase {phase_id}: {title}");
+                    }
+                    if let Some(steps) = phase.get("steps").and_then(|s| s.as_array()) {
+                        for (i, step) in steps.iter().enumerate() {
+                            let text = step.as_str().unwrap_or_default();
+                            println!("          {}. {}", i + 1, text);
+                        }
+                    }
                 }
             }
         }
@@ -520,6 +534,9 @@ fn save_current_session(session_id: &str) {
 
 #[tokio::main]
 async fn main() {
+    // Load .env from the workspace root (silently ignored if not present).
+    let _ = dotenvy::dotenv();
+
     let cli = Cli::parse();
 
     // Initialise tracing
@@ -584,6 +601,20 @@ async fn main() {
         c
     };
     let controller = Arc::new(controller);
+
+    // ── Nightly memory scheduler (fire-and-forget) ────────────────────────────
+    {
+        let sched = MemoryScheduler::new(
+            Arc::clone(&store),
+            Arc::new(LongTermMemoryStore::for_project(cwd.clone())),
+            MemoryDistillerAgent { llm: Arc::clone(&llm) },
+            RememberConfig::default(),
+        );
+        tokio::spawn(sched.run());
+    }
+
+    // ── recall_context: injected into the next pipeline request if set ────────
+    let mut recall_context: Option<String> = None;
 
     // ── Show current session info ─────────────────────────────────────────────
     if let Ok(Some(mem)) = store.get_session(&current_session_id).await {
@@ -1022,14 +1053,54 @@ async fn main() {
                 BuiltinCommand::Unknown(msg) => {
                     eprintln!("  ⚠️  {msg}");
                 }
+
+                BuiltinCommand::Remember { query } => {
+                    let mem_store = LongTermMemoryStore::for_project(cwd.clone());
+                    if let Some(q) = query {
+                        let pb = make_spinner("🔍  Searching memories…");
+                        let cards = mem_store
+                            .recall_and_rerank(&llm, &q, 3)
+                            .await
+                            .unwrap_or_default();
+                        pb.finish_and_clear();
+                        if cards.is_empty() {
+                            println!("  (No matching memories found for '{q}')");
+                        } else {
+                            println!();
+                            for card in &cards {
+                                println!("{}", card.display_block());
+                            }
+                            let inject = Confirm::new("将该召回结果加入下一次请求中？")
+                                .with_default(true)
+                                .prompt()
+                                .unwrap_or(true);
+                            if inject {
+                                recall_context = Some(cards[0].as_context_hint());
+                                println!("  ✅  Will prepend recalled memory to the next request.");
+                            }
+                        }
+                    } else {
+                        let mut cards = mem_store.load_all().await.unwrap_or_default();
+                        cards.truncate(10);
+                        if cards.is_empty() {
+                            println!("  (No memory cards yet — they are created nightly by the scheduler)");
+                        } else {
+                            println!("\n  \x1b[1mRecent memory cards\x1b[0m\n");
+                            for card in &cards {
+                                println!("{}", card.display_block());
+                            }
+                        }
+                    }
+                }
             }
             continue;
         }
-
-        // ── AI pipeline ───────────────────────────────────────────────────────
         let task = trimmed.to_string();
         info!(task = %task, session = %current_session_id, "Task received");
         println!();
+
+        // Take any pending recall context so the closure can capture it by value.
+        let captured_recall = recall_context.take();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<PipelineEvent>(16);
         let task_clone = task.clone();
@@ -1081,6 +1152,13 @@ async fn main() {
         let pipeline = tokio::spawn(async move {
             let mut request_context = RequestContext::from_prompt(task_clone);
             request_context.session_id = Some(session_id);
+            if let Some(ctx) = captured_recall {
+                let existing = request_context
+                    .session_state
+                    .persistent_summary
+                    .get_or_insert_with(String::new);
+                *existing = format!("{ctx}\n\n{existing}");
+            }
             controller_clone
                 .run_with_request_context(
                     &request_context,
